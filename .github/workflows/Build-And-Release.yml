@@ -53,8 +53,22 @@ jobs:
       - name: List nupkg directory
         run: dir ./nupkg
 
+      - name: Find Built Nupkg
+        id: find_nupkg
+        shell: powershell
+        run: |
+          $files = Get-ChildItem -Path ./nupkg -Filter *.nupkg -File -Recurse -ErrorAction SilentlyContinue
+          if ($null -eq $files -or $files.Count -eq 0) {
+            Write-Host "No .nupkg Files Found In ./nupkg"
+            exit 1
+          }
+          Write-Host "Found nupkg(s):"
+          $files | ForEach-Object { Write-Host $_.FullName }
+          $first = $files[0].FullName
+          "nupkg=$first" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Publish To GitHub Packages
-        run: dotnet nuget push ./nupkg/*.nupkg --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json -k ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+        run: dotnet nuget push "${{ steps.find_nupkg.outputs.nupkg }}" --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json -k ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
 
   release:
     needs: build

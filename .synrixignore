@@ -6,6 +6,7 @@
 
 # BUILD OUTPUTS
 bin/
+Bin/
 obj/
 *.exe
 *.dll

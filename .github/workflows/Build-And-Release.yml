@@ -47,6 +47,9 @@ jobs:
     - name: Add GitHub Packages source
       run: dotnet nuget add source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json -n "GitHub" -u ${{ github.repository_owner }} -p ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text
 
+    - name: Set API key for GitHub Packages
+      run: dotnet nuget setApiKey ${{ secrets.GITHUB_TOKEN }} --source "GitHub"
+
     - name: Publish To GitHub Packages
       run: dotnet nuget push ./nupkg/synrix.1.0.0.nupkg --source "GitHub"
 

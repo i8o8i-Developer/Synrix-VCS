@@ -1,0 +1,418 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// REFLOGMANAGER.SRX - REFERENCE LOG MANAGEMENT
+// TRACKS ALL CHANGES TO REFERENCES (BRANCHES, HEAD, ETC.)
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+namespace Synrix.Core
+{
+    // REFLOG ENTRY
+    public class ReflogEntry
+    {
+        public string OldValue { get; set; }
+        public string NewValue { get; set; }
+        public string Committer { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Action { get; set; }
+        public string Message { get; set; }
+        public int Index { get; set; }
+    }
+
+    // REFLOG MANAGER
+    public class ReflogManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string LogsPath;
+        private readonly ObjectStorage Storage;
+
+        public ReflogManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            LogsPath = Path.Combine(RepositoryPath, ".synrix", "logs");
+            Storage = new ObjectStorage(RepositoryPath);
+            InitializeLogs();
+        }
+
+        // INITIALIZE LOGS DIRECTORY
+        private void InitializeLogs()
+        {
+            Directory.CreateDirectory(LogsPath);
+            Directory.CreateDirectory(Path.Combine(LogsPath, "refs", "heads"));
+        }
+
+        // LOG REFERENCE CHANGE
+        public void LogRefChange(string RefName, string OldValue, string NewValue, string Action, string Message = null)
+        {
+            var LogFile = GetLogFile(RefName);
+            Directory.CreateDirectory(Path.GetDirectoryName(LogFile));
+
+            var Committer = GetCommitterInfo();
+            var Timestamp = DateTime.Now;
+
+            var OldHash = OldValue ?? new string('0', 64);
+            var NewHash = NewValue ?? new string('0', 64);
+
+            var LogEntry = $"{OldHash} {NewHash} {Committer} {Timestamp:O} {Action}";
+            if (!string.IsNullOrEmpty(Message))
+            {
+                LogEntry += $": {Message}";
+            }
+
+            File.AppendAllText(LogFile, LogEntry + Environment.NewLine);
+        }
+
+        // GET REFLOG FOR REFERENCE
+        public List<ReflogEntry> GetReflog(string RefName = "HEAD", int MaxCount = 0)
+        {
+            var LogFile = GetLogFile(RefName);
+            var Entries = new List<ReflogEntry>();
+
+            if (!File.Exists(LogFile))
+            {
+                return Entries;
+            }
+
+            var Lines = File.ReadAllLines(LogFile);
+            var Index = 0;
+
+            for (int I = Lines.Length - 1; I >= 0; I--)
+            {
+                var Entry = ParseReflogEntry(Lines[I], Index);
+                if (Entry != null)
+                {
+                    Entries.Add(Entry);
+                    Index++;
+
+                    if (MaxCount > 0 && Entries.Count >= MaxCount)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            return Entries;
+        }
+
+        // SHOW REFLOG
+        public void ShowReflog(string RefName = "HEAD", int MaxCount = 10)
+        {
+            var Entries = GetReflog(RefName, MaxCount);
+
+            if (Entries.Count == 0)
+            {
+                Console.WriteLine($"NO REFLOG FOR {RefName}");
+                return;
+            }
+
+            Console.WriteLine($"REFLOG FOR {RefName}:");
+            Console.WriteLine();
+
+            foreach (var Entry in Entries)
+            {
+                var NewShort = Entry.NewValue.Substring(0, 7);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write($"{RefName}@{{{Entry.Index}}} ");
+                Console.ResetColor();
+                Console.Write($"{NewShort} ");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write($"{Entry.Action}");
+                Console.ResetColor();
+
+                if (!string.IsNullOrEmpty(Entry.Message))
+                {
+                    Console.Write($": {Entry.Message}");
+                }
+
+                Console.WriteLine();
+            }
+        }
+
+        // GET REFERENCE AT INDEX
+        public string GetRefAtIndex(string RefName, int Index)
+        {
+            var Entries = GetReflog(RefName);
+
+            if (Index < 0 || Index >= Entries.Count)
+            {
+                return null;
+            }
+
+            return Entries[Index].NewValue;
+        }
+
+        // EXPIRE OLD REFLOG ENTRIES
+        public void ExpireReflog(string RefName, DateTime ExpireBefore)
+        {
+            var LogFile = GetLogFile(RefName);
+
+            if (!File.Exists(LogFile))
+            {
+                return;
+            }
+
+            var Lines = File.ReadAllLines(LogFile);
+            var NewLines = new List<string>();
+
+            foreach (var Line in Lines)
+            {
+                var Entry = ParseReflogEntry(Line, 0);
+                if (Entry != null && Entry.Timestamp >= ExpireBefore)
+                {
+                    NewLines.Add(Line);
+                }
+            }
+
+            File.WriteAllLines(LogFile, NewLines);
+            Console.WriteLine($"EXPIRED REFLOG ENTRIES BEFORE {ExpireBefore:yyyy-MM-dd}");
+        }
+
+        // DELETE REFLOG ENTRY
+        public void DeleteReflogEntry(string RefName, int Index)
+        {
+            var LogFile = GetLogFile(RefName);
+
+            if (!File.Exists(LogFile))
+            {
+                return;
+            }
+
+            var Lines = File.ReadAllLines(LogFile).ToList();
+
+            if (Index < 0 || Index >= Lines.Count)
+            {
+                throw new ArgumentException("INVALID REFLOG INDEX");
+            }
+
+            Lines.RemoveAt(Lines.Count - 1 - Index);
+            File.WriteAllLines(LogFile, Lines);
+
+            Console.WriteLine($"DELETED {RefName}@{{{Index}}}");
+        }
+
+        // RECOVER LOST COMMIT
+        public bool RecoverCommit(string CommitHash)
+        {
+            try
+            {
+                var Commit = Storage.GetCommit(CommitHash);
+                Console.WriteLine($"FOUND COMMIT: {CommitHash.Substring(0, 7)}");
+                Console.WriteLine($"AUTHOR: {Commit.Author}");
+                Console.WriteLine($"DATE: {Commit.Timestamp}");
+                Console.WriteLine($"MESSAGE: {Commit.Message}");
+                Console.WriteLine();
+                Console.WriteLine("TO RECOVER THIS COMMIT, CREATE A BRANCH:");
+                Console.WriteLine($"  synrix branch recovery-{CommitHash.Substring(0, 7)} {CommitHash}");
+                return true;
+            }
+            catch
+            {
+                Console.WriteLine("COMMIT NOT FOUND OR ALREADY GARBAGE COLLECTED");
+                return false;
+            }
+        }
+
+        // FIND LOST COMMITS
+        public List<string> FindLostCommits()
+        {
+            var LostCommits = new List<string>();
+            var ReachableCommits = new HashSet<string>();
+
+            // GET ALL REACHABLE COMMITS FROM BRANCHES
+            var RefsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "heads");
+            if (Directory.Exists(RefsPath))
+            {
+                foreach (var BranchFile in Directory.GetFiles(RefsPath))
+                {
+                    var CommitHash = File.ReadAllText(BranchFile).Trim();
+                    CollectReachableCommits(CommitHash, ReachableCommits);
+                }
+            }
+
+            // GET ALL COMMITS FROM REFLOG
+            var ReflogCommits = new HashSet<string>();
+            var Entries = GetReflog("HEAD", 0);
+            foreach (var Entry in Entries)
+            {
+                if (!string.IsNullOrEmpty(Entry.NewValue) && Entry.NewValue != new string('0', 64))
+                {
+                    ReflogCommits.Add(Entry.NewValue);
+                }
+            }
+
+            // FIND LOST COMMITS
+            foreach (var ReflogCommit in ReflogCommits)
+            {
+                if (!ReachableCommits.Contains(ReflogCommit))
+                {
+                    LostCommits.Add(ReflogCommit);
+                }
+            }
+
+            return LostCommits;
+        }
+
+        // SHOW LOST COMMITS
+        public void ShowLostCommits()
+        {
+            var LostCommits = FindLostCommits();
+
+            if (LostCommits.Count == 0)
+            {
+                Console.WriteLine("NO LOST COMMITS FOUND");
+                return;
+            }
+
+            Console.WriteLine($"FOUND {LostCommits.Count} LOST COMMIT(S):");
+            Console.WriteLine();
+
+            foreach (var CommitHash in LostCommits)
+            {
+                try
+                {
+                    var Commit = Storage.GetCommit(CommitHash);
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.Write($"{CommitHash.Substring(0, 7)} ");
+                    Console.ResetColor();
+                    Console.WriteLine($"{Commit.Message.Split('\n')[0]}");
+                    Console.WriteLine($"  {Commit.Author} - {Commit.Timestamp:yyyy-MM-dd HH:mm}");
+                    Console.WriteLine();
+                }
+                catch
+                {
+                    // SKIP IF COMMIT NO LONGER EXISTS
+                }
+            }
+        }
+
+        // HELPER METHODS
+
+        private string GetLogFile(string RefName)
+        {
+            if (RefName == "HEAD")
+            {
+                return Path.Combine(LogsPath, "HEAD");
+            }
+
+            if (RefName.StartsWith("refs/"))
+            {
+                return Path.Combine(LogsPath, RefName);
+            }
+
+            return Path.Combine(LogsPath, "refs", "heads", RefName);
+        }
+
+        private ReflogEntry ParseReflogEntry(string Line, int Index)
+        {
+            try
+            {
+                var Parts = Line.Split(new[] { ' ' }, 4);
+                if (Parts.Length < 4)
+                {
+                    return null;
+                }
+
+                var ActionAndMessage = Parts[3];
+                var ActionParts = ActionAndMessage.Split(new[] { ':' }, 2);
+
+                return new ReflogEntry
+                {
+                    OldValue = Parts[0],
+                    NewValue = Parts[1],
+                    Committer = Parts[2],
+                    Timestamp = DateTime.Parse(Parts[3].Split(' ')[0]),
+                    Action = ActionParts[0].Trim(),
+                    Message = ActionParts.Length > 1 ? ActionParts[1].Trim() : null,
+                    Index = Index
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private string GetCommitterInfo()
+        {
+            var ConfigPath = Path.Combine(RepositoryPath, ".synrix", "config");
+            if (File.Exists(ConfigPath))
+            {
+                var Lines = File.ReadAllLines(ConfigPath);
+                string Name = null;
+                string Email = null;
+
+                foreach (var Line in Lines)
+                {
+                    if (Line.StartsWith("user.name="))
+                    {
+                        Name = Line.Substring(10).Trim();
+                    }
+                    else if (Line.StartsWith("user.email="))
+                    {
+                        Email = Line.Substring(11).Trim();
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(Name) && !string.IsNullOrEmpty(Email))
+                {
+                    return $"{Name} <{Email}>";
+                }
+            }
+
+            return "Unknown <unknown@synrix.local>";
+        }
+
+        private void CollectReachableCommits(string CommitHash, HashSet<string> Reachable)
+        {
+            if (string.IsNullOrEmpty(CommitHash) || Reachable.Contains(CommitHash))
+            {
+                return;
+            }
+
+            Reachable.Add(CommitHash);
+
+            try
+            {
+                var Commit = Storage.GetCommit(CommitHash);
+                foreach (var Parent in Commit.ParentHashes)
+                {
+                    CollectReachableCommits(Parent, Reachable);
+                }
+            }
+            catch
+            {
+                // SKIP IF COMMIT NOT FOUND
+            }
+        }
+
+        // LIST ALL REFLOGS
+        public void ListAllReflogs()
+        {
+            Console.WriteLine("\n=== ALL REFLOGS ===\n");
+
+            var headsPath = Path.Combine(LogsPath, "refs", "heads");
+            if (Directory.Exists(headsPath))
+            {
+                var branchLogs = Directory.GetFiles(headsPath, "*", SearchOption.AllDirectories);
+                foreach (var logFile in branchLogs)
+                {
+                    var refName = "refs/heads/" + Path.GetRelativePath(headsPath, logFile).Replace("\\", "/");
+                    var entries = GetReflog(refName);
+                    if (entries.Count > 0)
+                    {
+                        Console.WriteLine($"{refName}: {entries.Count} entries");
+                    }
+                }
+            }
+
+            var headLog = Path.Combine(LogsPath, "HEAD");
+            if (File.Exists(headLog))
+            {
+                var entries = GetReflog("HEAD");
+                Console.WriteLine($"HEAD: {entries.Count} entries");
+            }
+        }
+    }
+}

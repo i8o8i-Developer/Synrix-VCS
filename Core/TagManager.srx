@@ -1,0 +1,270 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// TAGMANAGER.SRX - TAG MANAGEMENT
+// LIGHTWEIGHT AND ANNOTATED TAGS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Core
+{
+    // TAG TYPE
+    public enum TagType
+    {
+        Lightweight,
+        Annotated
+    }
+
+    // TAG INFO
+    public class TagInfo
+    {
+        public string Name { get; set; }
+        public string CommitHash { get; set; }
+        public TagType Type { get; set; }
+        public string Message { get; set; }
+        public string Tagger { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+
+    // TAG MANAGER
+    public class TagManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string TagsPath;
+        private readonly ObjectStorage Storage;
+        private readonly RepositoryManager RepoMgr;
+
+        public TagManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            TagsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "tags");
+            Storage = new ObjectStorage(RepositoryPath);
+            RepoMgr = new RepositoryManager(RepositoryPath);
+            InitializeTags();
+        }
+
+        // INITIALIZE TAGS DIRECTORY
+        private void InitializeTags()
+        {
+            Directory.CreateDirectory(TagsPath);
+        }
+
+        // CREATE LIGHTWEIGHT TAG
+        public void CreateLightweightTag(string Name, string CommitHash = null)
+        {
+            if (TagExists(Name))
+            {
+                throw new InvalidOperationException($"TAG '{Name}' ALREADY EXISTS");
+            }
+
+            var Commit = CommitHash ?? RepoMgr.GetCurrentCommit();
+            if (string.IsNullOrEmpty(Commit))
+            {
+                throw new InvalidOperationException("NO COMMIT SPECIFIED");
+            }
+
+            var TagPath = Path.Combine(TagsPath, Name);
+            File.WriteAllText(TagPath, Commit);
+
+            Console.WriteLine($"CREATED TAG: {Name} -> {Commit.Substring(0, 7)}");
+        }
+
+        // CREATE ANNOTATED TAG
+        public void CreateAnnotatedTag(string Name, string Message, string CommitHash = null)
+        {
+            if (TagExists(Name))
+            {
+                throw new InvalidOperationException($"TAG '{Name}' ALREADY EXISTS");
+            }
+
+            var Commit = CommitHash ?? RepoMgr.GetCurrentCommit();
+            if (string.IsNullOrEmpty(Commit))
+            {
+                throw new InvalidOperationException("NO COMMIT SPECIFIED");
+            }
+
+            // CREATE TAG OBJECT
+            var Config = RepoMgr.LoadConfig();
+            var Tagger = $"{Config.UserName ?? "Unknown"} <{Config.UserEmail ?? "unknown@synrix.local"}>";
+            var Timestamp = DateTime.Now;
+
+            var TagContent = new StringBuilder();
+            TagContent.AppendLine($"object {Commit}");
+            TagContent.AppendLine("type commit");
+            TagContent.AppendLine($"tag {Name}");
+            TagContent.AppendLine($"tagger {Tagger} {Timestamp:O}");
+            TagContent.AppendLine();
+            TagContent.AppendLine(Message);
+
+            var TagHash = Storage.StoreObject(new SynrixObject
+            {
+                Type = ObjectType.Tag,
+                Content = Encoding.UTF8.GetBytes(TagContent.ToString())
+            });
+
+            var TagPath = Path.Combine(TagsPath, Name);
+            File.WriteAllText(TagPath, TagHash);
+
+            Console.WriteLine($"CREATED ANNOTATED TAG: {Name} -> {Commit.Substring(0, 7)}");
+        }
+
+        // DELETE TAG
+        public void DeleteTag(string Name)
+        {
+            if (!TagExists(Name))
+            {
+                throw new InvalidOperationException($"TAG '{Name}' NOT FOUND");
+            }
+
+            var TagPath = Path.Combine(TagsPath, Name);
+            File.Delete(TagPath);
+
+            Console.WriteLine($"DELETED TAG: {Name}");
+        }
+
+        // LIST TAGS
+        public List<string> ListTags(string Pattern = null)
+        {
+            var Tags = new List<string>();
+
+            if (!Directory.Exists(TagsPath))
+            {
+                return Tags;
+            }
+
+            foreach (var TagFile in Directory.GetFiles(TagsPath))
+            {
+                var TagName = Path.GetFileName(TagFile);
+
+                if (Pattern != null && !TagName.Contains(Pattern))
+                {
+                    continue;
+                }
+
+                Tags.Add(TagName);
+            }
+
+            Tags.Sort();
+            return Tags;
+        }
+
+        // SHOW TAG INFO
+        public void ShowTag(string Name)
+        {
+            if (!TagExists(Name))
+            {
+                throw new InvalidOperationException($"TAG '{Name}' NOT FOUND");
+            }
+
+            var TagInfo = GetTagInfo(Name);
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"TAG: {TagInfo.Name}");
+            Console.ResetColor();
+
+            if (TagInfo.Type == TagType.Annotated)
+            {
+                Console.WriteLine($"TAGGER: {TagInfo.Tagger}");
+                Console.WriteLine($"DATE: {TagInfo.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine();
+                Console.WriteLine(TagInfo.Message);
+                Console.WriteLine();
+            }
+
+            Console.WriteLine($"COMMIT: {TagInfo.CommitHash}");
+
+            // SHOW COMMIT INFO
+            try
+            {
+                var Commit = Storage.GetCommit(TagInfo.CommitHash);
+                Console.WriteLine($"AUTHOR: {Commit.Author}");
+                Console.WriteLine($"DATE: {Commit.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine();
+                Console.WriteLine($"    {Commit.Message}");
+            }
+            catch
+            {
+                Console.WriteLine("COMMIT NOT FOUND");
+            }
+        }
+
+        // GET TAG INFO
+        public TagInfo GetTagInfo(string Name)
+        {
+            var TagPath = Path.Combine(TagsPath, Name);
+            var TagRef = File.ReadAllText(TagPath).Trim();
+
+            var Info = new TagInfo { Name = Name };
+
+            // CHECK IF IT'S AN ANNOTATED TAG
+            if (Storage.ObjectExists(TagRef))
+            {
+                try
+                {
+                    var TagObj = Storage.GetObject(TagRef);
+                    if (TagObj.Type == ObjectType.Tag)
+                    {
+                        Info.Type = TagType.Annotated;
+                        ParseAnnotatedTag(TagObj, Info);
+                        return Info;
+                    }
+                }
+                catch { }
+            }
+
+            // LIGHTWEIGHT TAG
+            Info.Type = TagType.Lightweight;
+            Info.CommitHash = TagRef;
+            return Info;
+        }
+
+        // HELPER METHODS
+
+        private bool TagExists(string Name)
+        {
+            var TagPath = Path.Combine(TagsPath, Name);
+            return File.Exists(TagPath);
+        }
+
+        private void ParseAnnotatedTag(SynrixObject TagObj, TagInfo Info)
+        {
+            var Content = Encoding.UTF8.GetString(TagObj.Content);
+            var Lines = Content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var MessageStarted = false;
+            var MessageBuilder = new StringBuilder();
+
+            foreach (var Line in Lines)
+            {
+                if (string.IsNullOrWhiteSpace(Line) && !MessageStarted)
+                {
+                    MessageStarted = true;
+                    continue;
+                }
+
+                if (MessageStarted)
+                {
+                    MessageBuilder.AppendLine(Line);
+                }
+                else if (Line.StartsWith("object "))
+                {
+                    Info.CommitHash = Line.Substring(7);
+                }
+                else if (Line.StartsWith("tagger "))
+                {
+                    var TaggerLine = Line.Substring(7);
+                    var LastSpaceIndex = TaggerLine.LastIndexOf(' ');
+                    if (LastSpaceIndex > 0)
+                    {
+                        Info.Tagger = TaggerLine.Substring(0, LastSpaceIndex);
+                        DateTime.TryParse(TaggerLine.Substring(LastSpaceIndex + 1), out var Timestamp);
+                        Info.Timestamp = Timestamp;
+                    }
+                }
+            }
+
+            Info.Message = MessageBuilder.ToString().TrimEnd();
+        }
+    }
+}

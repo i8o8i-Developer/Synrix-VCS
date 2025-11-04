@@ -1,0 +1,581 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// MERGEMANAGER.SRX - MERGE OPERATIONS AND CONFLICT RESOLUTION
+// HANDLES THREE-WAY MERGE, CONFLICT DETECTION, AND RESOLUTION
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Core
+{
+    // MERGE RESULT
+    public class MergeResult
+    {
+        public bool Success { get; set; }
+        public bool HasConflicts { get; set; }
+        public List<string> ConflictFiles { get; set; }
+        public List<string> MergedFiles { get; set; }
+        public string MergeCommitHash { get; set; }
+        public string Message { get; set; }
+
+        public MergeResult()
+        {
+            ConflictFiles = new List<string>();
+            MergedFiles = new List<string>();
+        }
+    }
+
+    // MERGE CONFLICT
+    public class MergeConflict
+    {
+        public string FilePath { get; set; }
+        public string BaseContent { get; set; }
+        public string OursContent { get; set; }
+        public string TheirsContent { get; set; }
+    }
+
+    // FILE MERGE STATUS
+    public enum FileMergeStatus
+    {
+        Merged,
+        Conflict,
+        Deleted,
+        Added,
+        Modified
+    }
+
+    // MERGE MANAGER
+    public class MergeManager
+    {
+        private readonly string RepositoryPath;
+        private readonly ObjectStorage Storage;
+        private readonly RepositoryManager RepoManager;
+        private readonly BranchManager BranchMgr;
+        private readonly CommitManager CommitMgr;
+        private readonly StagingArea Staging;
+        private readonly string MergeHeadPath;
+        private readonly string MergeMsgPath;
+
+        public MergeManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            Storage = new ObjectStorage(RepositoryPath);
+            RepoManager = new RepositoryManager(RepositoryPath);
+            BranchMgr = new BranchManager(RepositoryPath);
+            CommitMgr = new CommitManager(RepositoryPath);
+            Staging = new StagingArea(RepositoryPath);
+            MergeHeadPath = Path.Combine(RepositoryPath, ".synrix", "MERGE_HEAD");
+            MergeMsgPath = Path.Combine(RepositoryPath, ".synrix", "MERGE_MSG");
+        }
+
+        // MERGE A BRANCH INTO CURRENT BRANCH
+        public MergeResult MergeBranch(string BranchName, bool NoFastForward = false)
+        {
+            var Result = new MergeResult();
+
+            // VALIDATE BRANCH
+            if (!BranchMgr.BranchExists(BranchName))
+            {
+                throw new InvalidOperationException($"BRANCH NOT FOUND: {BranchName}");
+            }
+
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            if (CurrentBranch == BranchName)
+            {
+                throw new InvalidOperationException("CANNOT MERGE BRANCH INTO ITSELF");
+            }
+
+            // GET COMMIT HASHES
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            var TargetCommit = BranchMgr.GetBranchCommit(BranchName);
+
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                throw new InvalidOperationException("NO COMMITS IN CURRENT BRANCH");
+            }
+
+            if (CurrentCommit == TargetCommit)
+            {
+                Result.Success = true;
+                Result.Message = "ALREADY UP TO DATE";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+
+            // CHECK IF FAST-FORWARD IS POSSIBLE
+            if (!NoFastForward && CanFastForward(CurrentCommit, TargetCommit))
+            {
+                return FastForwardMerge(TargetCommit, BranchName);
+            }
+
+            // PERFORM THREE-WAY MERGE
+            return ThreeWayMerge(CurrentCommit, TargetCommit, BranchName);
+        }
+
+        // CHECK IF FAST-FORWARD MERGE IS POSSIBLE
+        private bool CanFastForward(string CurrentCommit, string TargetCommit)
+        {
+            // FAST-FORWARD IS POSSIBLE IF CURRENT IS ANCESTOR OF TARGET
+            return BranchMgr.GetCommonAncestor(CurrentCommit, TargetCommit) == CurrentCommit;
+        }
+
+        // PERFORM FAST-FORWARD MERGE
+        private MergeResult FastForwardMerge(string TargetCommit, string BranchName)
+        {
+            var Result = new MergeResult();
+
+            Console.WriteLine($"FAST-FORWARD MERGE: {BranchName}");
+
+            // UPDATE BRANCH REFERENCE
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            var BranchPath = Path.Combine(RepositoryPath, ".synrix", "refs", "heads", CurrentBranch);
+            File.WriteAllText(BranchPath, TargetCommit);
+
+            // CHECKOUT TARGET COMMIT
+            BranchMgr.CheckoutCommit(TargetCommit);
+
+            Result.Success = true;
+            Result.Message = $"FAST-FORWARDED TO {TargetCommit.Substring(0, 7)}";
+            
+            Console.WriteLine(Result.Message);
+            return Result;
+        }
+
+        // PERFORM THREE-WAY MERGE
+        private MergeResult ThreeWayMerge(string CurrentCommit, string TargetCommit, string BranchName)
+        {
+            var Result = new MergeResult();
+
+            Console.WriteLine($"PERFORMING THREE-WAY MERGE: {BranchName}");
+
+            // FIND COMMON ANCESTOR
+            var BaseCommit = BranchMgr.GetCommonAncestor(CurrentCommit, TargetCommit);
+
+            if (string.IsNullOrEmpty(BaseCommit))
+            {
+                throw new InvalidOperationException("NO COMMON ANCESTOR FOUND");
+            }
+
+            Console.WriteLine($"MERGE BASE: {BaseCommit.Substring(0, 7)}");
+
+            // GET TREES
+            var BaseTree = CommitMgr.GetCommitTree(BaseCommit);
+            var OursTree = CommitMgr.GetCommitTree(CurrentCommit);
+            var TheirsTree = CommitMgr.GetCommitTree(TargetCommit);
+
+            // GET ALL FILES
+            var BaseFiles = GetAllFilesFromTree(BaseTree);
+            var OursFiles = GetAllFilesFromTree(OursTree);
+            var TheirsFiles = GetAllFilesFromTree(TheirsTree);
+
+            // GET ALL UNIQUE FILE PATHS
+            var AllFiles = new HashSet<string>(BaseFiles.Keys);
+            AllFiles.UnionWith(OursFiles.Keys);
+            AllFiles.UnionWith(TheirsFiles.Keys);
+
+            // MERGE EACH FILE
+            foreach (var FilePath in AllFiles)
+            {
+                var BaseHash = BaseFiles.ContainsKey(FilePath) ? BaseFiles[FilePath] : null;
+                var OursHash = OursFiles.ContainsKey(FilePath) ? OursFiles[FilePath] : null;
+                var TheirsHash = TheirsFiles.ContainsKey(FilePath) ? TheirsFiles[FilePath] : null;
+
+                var MergeStatus = MergeFile(FilePath, BaseHash, OursHash, TheirsHash);
+
+                if (MergeStatus == FileMergeStatus.Conflict)
+                {
+                    Result.HasConflicts = true;
+                    Result.ConflictFiles.Add(FilePath);
+                }
+                else
+                {
+                    Result.MergedFiles.Add(FilePath);
+                }
+            }
+
+            // SAVE MERGE STATE
+            File.WriteAllText(MergeHeadPath, TargetCommit);
+            File.WriteAllText(MergeMsgPath, $"MERGE BRANCH '{BranchName}' INTO {RepoManager.GetCurrentBranch()}");
+
+            if (Result.HasConflicts)
+            {
+                Result.Success = false;
+                Result.Message = $"AUTOMATIC MERGE FAILED - FIX CONFLICTS AND COMMIT";
+                
+                Console.WriteLine(Result.Message);
+                Console.WriteLine($"CONFLICTED FILES: {Result.ConflictFiles.Count}");
+                
+                foreach (var File in Result.ConflictFiles)
+                {
+                    Console.WriteLine($"  - {File}");
+                }
+            }
+            else
+            {
+                // AUTO-COMMIT IF NO CONFLICTS
+                var MergeMessage = File.ReadAllText(MergeMsgPath);
+                Result.MergeCommitHash = CommitMgr.CreateMergeCommit(
+                    MergeMessage, 
+                    new List<string> { CurrentCommit, TargetCommit }
+                );
+
+                // CLEAN UP MERGE STATE
+                CleanupMergeState();
+
+                Result.Success = true;
+                Result.Message = $"MERGE SUCCESSFUL: {Result.MergeCommitHash.Substring(0, 7)}";
+                
+                Console.WriteLine(Result.Message);
+            }
+
+            return Result;
+        }
+
+        // MERGE A SINGLE FILE
+        private FileMergeStatus MergeFile(string FilePath, string BaseHash, string OursHash, string TheirsHash)
+        {
+            var FullPath = Path.Combine(RepositoryPath, FilePath);
+
+            // CASE 1: FILE UNCHANGED IN BOTH BRANCHES
+            if (OursHash == TheirsHash)
+            {
+                if (OursHash != null)
+                {
+                    Staging.AddFile(FilePath);
+                }
+                return FileMergeStatus.Merged;
+            }
+
+            // CASE 2: FILE ONLY CHANGED IN OURS
+            if (TheirsHash == BaseHash && OursHash != BaseHash)
+            {
+                // KEEP OUR VERSION
+                Staging.AddFile(FilePath);
+                return FileMergeStatus.Modified;
+            }
+
+            // CASE 3: FILE ONLY CHANGED IN THEIRS
+            if (OursHash == BaseHash && TheirsHash != BaseHash)
+            {
+                // TAKE THEIR VERSION
+                if (TheirsHash != null)
+                {
+                    var Content = Storage.GetBlob(TheirsHash);
+                    Directory.CreateDirectory(Path.GetDirectoryName(FullPath));
+                    File.WriteAllBytes(FullPath, Content);
+                    Staging.AddFile(FilePath);
+                }
+                else
+                {
+                    // FILE DELETED IN THEIRS
+                    if (File.Exists(FullPath))
+                    {
+                        File.Delete(FullPath);
+                    }
+                }
+                return FileMergeStatus.Modified;
+            }
+
+            // CASE 4: FILE ADDED IN BOTH (SAME CONTENT)
+            if (BaseHash == null && OursHash == TheirsHash)
+            {
+                Staging.AddFile(FilePath);
+                return FileMergeStatus.Added;
+            }
+
+            // CASE 5: FILE DELETED IN BOTH
+            if (OursHash == null && TheirsHash == null)
+            {
+                return FileMergeStatus.Deleted;
+            }
+
+            // CASE 6: CONFLICT - CHANGED IN BOTH BRANCHES
+            return CreateConflictFile(FilePath, BaseHash, OursHash, TheirsHash);
+        }
+
+        // CREATE CONFLICT MARKERS IN FILE
+        private FileMergeStatus CreateConflictFile(string FilePath, string BaseHash, string OursHash, string TheirsHash)
+        {
+            var FullPath = Path.Combine(RepositoryPath, FilePath);
+            var ConflictContent = new StringBuilder();
+
+            // GET FILE CONTENTS
+            var BaseContent = BaseHash != null ? Encoding.UTF8.GetString(Storage.GetBlob(BaseHash)) : "";
+            var OursContent = OursHash != null ? Encoding.UTF8.GetString(Storage.GetBlob(OursHash)) : "";
+            var TheirsContent = TheirsHash != null ? Encoding.UTF8.GetString(Storage.GetBlob(TheirsHash)) : "";
+
+            // TRY LINE-BY-LINE MERGE
+            var BaseLines = BaseContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var OursLines = OursContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var TheirsLines = TheirsContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            // SIMPLE CONFLICT MARKER FORMAT
+            ConflictContent.AppendLine("<<<<<<< HEAD (CURRENT)");
+            ConflictContent.AppendLine(OursContent);
+            ConflictContent.AppendLine("=======");
+            ConflictContent.AppendLine(TheirsContent);
+            ConflictContent.AppendLine(">>>>>>> MERGE");
+
+            // WRITE CONFLICT FILE
+            Directory.CreateDirectory(Path.GetDirectoryName(FullPath));
+            File.WriteAllText(FullPath, ConflictContent.ToString());
+
+            return FileMergeStatus.Conflict;
+        }
+
+        // GET ALL FILES FROM TREE
+        private Dictionary<string, string> GetAllFilesFromTree(List<TreeEntry> Tree, string Prefix = "")
+        {
+            var Files = new Dictionary<string, string>();
+
+            foreach (var Entry in Tree)
+            {
+                var FilePath = string.IsNullOrEmpty(Prefix) ? Entry.Name : $"{Prefix}/{Entry.Name}";
+
+                if (Entry.Type == "blob")
+                {
+                    Files[FilePath] = Entry.Hash;
+                }
+                else if (Entry.Type == "tree")
+                {
+                    var SubTree = Storage.GetTree(Entry.Hash);
+                    var SubFiles = GetAllFilesFromTree(SubTree, FilePath);
+                    
+                    foreach (var SubFile in SubFiles)
+                    {
+                        Files[SubFile.Key] = SubFile.Value;
+                    }
+                }
+            }
+
+            return Files;
+        }
+
+        // ABORT MERGE
+        public void AbortMerge()
+        {
+            if (!IsMergeInProgress())
+            {
+                throw new InvalidOperationException("NO MERGE IN PROGRESS");
+            }
+
+            Console.WriteLine("ABORTING MERGE...");
+
+            // RESTORE TO HEAD COMMIT
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            BranchMgr.CheckoutCommit(CurrentCommit);
+
+            // CLEAN UP MERGE STATE
+            CleanupMergeState();
+
+            Console.WriteLine("MERGE ABORTED");
+        }
+
+        // CONTINUE MERGE AFTER RESOLVING CONFLICTS
+        public string ContinueMerge()
+        {
+            if (!IsMergeInProgress())
+            {
+                throw new InvalidOperationException("NO MERGE IN PROGRESS");
+            }
+
+            // CHECK IF THERE ARE STILL CONFLICTS
+            var ConflictFiles = FindConflictMarkers();
+            
+            if (ConflictFiles.Count > 0)
+            {
+                throw new InvalidOperationException($"CONFLICTS STILL EXIST IN {ConflictFiles.Count} FILE(S)");
+            }
+
+            // GET MERGE INFORMATION
+            var MergeHead = File.ReadAllText(MergeHeadPath).Trim();
+            var MergeMessage = File.ReadAllText(MergeMsgPath);
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+
+            // CREATE MERGE COMMIT
+            var CommitHash = CommitMgr.CreateMergeCommit(
+                MergeMessage, 
+                new List<string> { CurrentCommit, MergeHead }
+            );
+
+            // CLEAN UP MERGE STATE
+            CleanupMergeState();
+
+            Console.WriteLine($"MERGE COMPLETED: {CommitHash.Substring(0, 7)}");
+
+            return CommitHash;
+        }
+
+        // CHECK IF MERGE IS IN PROGRESS
+        public bool IsMergeInProgress()
+        {
+            return File.Exists(MergeHeadPath);
+        }
+
+        // FIND FILES WITH CONFLICT MARKERS
+        private List<string> FindConflictMarkers()
+        {
+            var ConflictFiles = new List<string>();
+            var Files = Staging.GetAllEntries();
+
+            foreach (var File in Files.Keys)
+            {
+                var FilePath = Path.Combine(RepositoryPath, File);
+                
+                if (System.IO.File.Exists(FilePath))
+                {
+                    var Content = System.IO.File.ReadAllText(FilePath);
+                    
+                    if (Content.Contains("<<<<<<< HEAD") && 
+                        Content.Contains("=======") && 
+                        Content.Contains(">>>>>>> MERGE"))
+                    {
+                        ConflictFiles.Add(File);
+                    }
+                }
+            }
+
+            return ConflictFiles;
+        }
+
+        // CLEAN UP MERGE STATE FILES
+        private void CleanupMergeState()
+        {
+            if (File.Exists(MergeHeadPath))
+            {
+                File.Delete(MergeHeadPath);
+            }
+
+            if (File.Exists(MergeMsgPath))
+            {
+                File.Delete(MergeMsgPath);
+            }
+        }
+
+        // SHOW MERGE STATUS
+        public void ShowMergeStatus()
+        {
+            if (!IsMergeInProgress())
+            {
+                Console.WriteLine("NO MERGE IN PROGRESS");
+                return;
+            }
+
+            var MergeHead = File.ReadAllText(MergeHeadPath).Trim();
+            var MergeMessage = File.ReadAllText(MergeMsgPath);
+
+            Console.WriteLine("MERGE IN PROGRESS");
+            Console.WriteLine($"MERGING: {MergeHead.Substring(0, 7)}");
+            Console.WriteLine($"MESSAGE: {MergeMessage}");
+            Console.WriteLine();
+
+            var ConflictFiles = FindConflictMarkers();
+            
+            if (ConflictFiles.Count > 0)
+            {
+                Console.WriteLine($"CONFLICTED FILES ({ConflictFiles.Count}):");
+                foreach (var File in ConflictFiles)
+                {
+                    Console.WriteLine($"  - {File}");
+                }
+                Console.WriteLine();
+                Console.WriteLine("RESOLVE CONFLICTS AND COMMIT TO COMPLETE MERGE");
+            }
+            else
+            {
+                Console.WriteLine("ALL CONFLICTS RESOLVED");
+                Console.WriteLine("RUN 'synrix merge --continue' TO COMPLETE MERGE");
+            }
+        }
+
+        // CHERRY-PICK A COMMIT
+        public void CherryPick(string CommitReference)
+        {
+            var CommitHash = CommitMgr.ResolveReference(CommitReference);
+            
+            if (string.IsNullOrEmpty(CommitHash))
+            {
+                throw new ArgumentException($"INVALID COMMIT: {CommitReference}");
+            }
+
+            Console.WriteLine($"CHERRY-PICKING COMMIT: {CommitHash.Substring(0, 7)}");
+
+            var Commit = Storage.GetCommit(CommitHash);
+            
+            if (Commit.ParentHashes.Count == 0)
+            {
+                throw new InvalidOperationException("CANNOT CHERRY-PICK ROOT COMMIT");
+            }
+
+            // GET PARENT COMMIT
+            var ParentHash = Commit.ParentHashes[0];
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+
+            // PERFORM THREE-WAY MERGE
+            var Result = ThreeWayMerge(CurrentCommit, CommitHash, $"cherry-pick-{CommitHash.Substring(0, 7)}");
+
+            if (!Result.HasConflicts)
+            {
+                Console.WriteLine($"CHERRY-PICK SUCCESSFUL");
+            }
+        }
+
+        // REBASE CURRENT BRANCH ONTO TARGET
+        public void Rebase(string TargetBranch)
+        {
+            if (!BranchMgr.BranchExists(TargetBranch))
+            {
+                throw new InvalidOperationException($"BRANCH NOT FOUND: {TargetBranch}");
+            }
+
+            Console.WriteLine($"REBASING ONTO: {TargetBranch}");
+
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            var TargetCommit = BranchMgr.GetBranchCommit(TargetBranch);
+
+            // FIND COMMON ANCESTOR
+            var BaseCommit = BranchMgr.GetCommonAncestor(CurrentCommit, TargetCommit);
+
+            // GET COMMITS TO REPLAY
+            var CommitsToReplay = GetCommitsBetween(BaseCommit, CurrentCommit);
+
+            // CHECKOUT TARGET
+            BranchMgr.CheckoutCommit(TargetCommit);
+
+            // REPLAY COMMITS
+            foreach (var Commit in CommitsToReplay)
+            {
+                Console.WriteLine($"REPLAYING: {Commit.Substring(0, 7)}");
+                CherryPick(Commit);
+            }
+
+            Console.WriteLine("REBASE COMPLETE");
+        }
+
+        // GET COMMITS BETWEEN BASE AND TARGET
+        private List<string> GetCommitsBetween(string BaseCommit, string TargetCommit)
+        {
+            var Commits = new List<string>();
+            var CurrentHash = TargetCommit;
+
+            while (CurrentHash != BaseCommit && !string.IsNullOrEmpty(CurrentHash))
+            {
+                Commits.Add(CurrentHash);
+                
+                var Commit = Storage.GetCommit(CurrentHash);
+                CurrentHash = Commit.ParentHashes.Count > 0 ? Commit.ParentHashes[0] : null;
+            }
+
+            Commits.Reverse();
+            return Commits;
+        }
+
+        // FIND COMMON ANCESTOR BETWEEN TWO COMMITS
+        public string? FindCommonAncestor(string commit1, string commit2)
+        {
+            return BranchMgr.GetCommonAncestor(commit1, commit2);
+        }
+    }
+}

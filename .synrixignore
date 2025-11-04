@@ -1,0 +1,106 @@
+# SYNRIX IGNORE FILE TEMPLATE
+# SPECIFY FILES AND DIRECTORIES TO IGNORE IN VERSION CONTROL
+
+# SYNRIX INTERNAL
+.synrix/
+
+# BUILD OUTPUTS
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# TEMPORARY FILES
+*.tmp
+*.temp
+*.bak
+*~
+
+# LOG FILES
+*.log
+
+# IDE AND EDITOR FILES
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS GENERATED FILES
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# COMPILED BINARIES
+*.o
+*.so
+*.dylib
+*.class
+
+# PACKAGE FILES
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# NODE MODULES (IF USING JAVASCRIPT)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# PYTHON CACHE (IF USING PYTHON)
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+
+# DOTNET SPECIFIC
+project.lock.json
+project.fragment.lock.json
+artifacts/
+**/Properties/launchSettings.json
+
+# NUGET PACKAGES
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# TEST RESULTS
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# BACKUP FILES
+*.orig
+*.rej
+*.swp
+*.swo
+
+# CREDENTIALS AND SECRETS
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+appsettings.local.json
+
+# DOCUMENTATION BUILD
+_site/
+docs/_build/
+
+# CUSTOM SYNRIX PATTERNS
+# ADD YOUR PROJECT-SPECIFIC PATTERNS BELOW

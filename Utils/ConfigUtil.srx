@@ -1,0 +1,298 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// CONFIGUTIL.SRX - CONFIGURATION UTILITIES
+// HELPER FUNCTIONS FOR MANAGING CONFIGURATION
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+
+namespace Synrix.Utils
+{
+    // CONFIGURATION SCOPE
+    public enum ConfigScope
+    {
+        Local,      // REPOSITORY-SPECIFIC
+        Global,     // USER-SPECIFIC
+        System      // SYSTEM-WIDE
+    }
+
+    // CONFIGURATION ENTRY
+    public class ConfigEntry
+    {
+        public string Key { get; set; }
+        public string Value { get; set; }
+        public ConfigScope Scope { get; set; }
+    }
+
+    public static class ConfigUtil
+    {
+        // GET GLOBAL CONFIG PATH
+        public static string GetGlobalConfigPath()
+        {
+            var HomeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return Path.Combine(HomeDirectory, ".synrixconfig");
+        }
+
+        // GET SYSTEM CONFIG PATH
+        public static string GetSystemConfigPath()
+        {
+            var ProgramData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            return Path.Combine(ProgramData, "Synrix", "config");
+        }
+
+        // LOAD CONFIG FROM FILE
+        public static Dictionary<string, string> LoadConfig(string ConfigPath)
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return new Dictionary<string, string>();
+            }
+
+            try
+            {
+                var JsonContent = File.ReadAllText(ConfigPath);
+                return JsonSerializer.Deserialize<Dictionary<string, string>>(JsonContent) 
+                       ?? new Dictionary<string, string>();
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+        }
+
+        // SAVE CONFIG TO FILE
+        public static void SaveConfig(string ConfigPath, Dictionary<string, string> Config)
+        {
+            var Directory = Path.GetDirectoryName(ConfigPath);
+            if (!string.IsNullOrEmpty(Directory))
+            {
+                System.IO.Directory.CreateDirectory(Directory);
+            }
+
+            var JsonOptions = new JsonSerializerOptions { WriteIndented = true };
+            var JsonContent = JsonSerializer.Serialize(Config, JsonOptions);
+            File.WriteAllText(ConfigPath, JsonContent);
+        }
+
+        // GET CONFIG VALUE
+        public static string GetConfigValue(string ConfigPath, string Key)
+        {
+            var Config = LoadConfig(ConfigPath);
+            return Config.ContainsKey(Key) ? Config[Key] : null;
+        }
+
+        // SET CONFIG VALUE
+        public static void SetConfigValue(string ConfigPath, string Key, string Value)
+        {
+            var Config = LoadConfig(ConfigPath);
+            Config[Key] = Value;
+            SaveConfig(ConfigPath, Config);
+        }
+
+        // REMOVE CONFIG VALUE
+        public static void RemoveConfigValue(string ConfigPath, string Key)
+        {
+            var Config = LoadConfig(ConfigPath);
+            
+            if (Config.ContainsKey(Key))
+            {
+                Config.Remove(Key);
+                SaveConfig(ConfigPath, Config);
+            }
+        }
+
+        // GET ALL CONFIG ENTRIES
+        public static List<ConfigEntry> GetAllEntries(string ConfigPath, ConfigScope Scope)
+        {
+            var Config = LoadConfig(ConfigPath);
+            var Entries = new List<ConfigEntry>();
+
+            foreach (var Kvp in Config)
+            {
+                Entries.Add(new ConfigEntry
+                {
+                    Key = Kvp.Key,
+                    Value = Kvp.Value,
+                    Scope = Scope
+                });
+            }
+
+            return Entries;
+        }
+
+        // MERGE CONFIGS (LOCAL OVERRIDES GLOBAL OVERRIDES SYSTEM)
+        public static Dictionary<string, string> MergeConfigs(
+            Dictionary<string, string> SystemConfig,
+            Dictionary<string, string> GlobalConfig,
+            Dictionary<string, string> LocalConfig)
+        {
+            var Merged = new Dictionary<string, string>();
+
+            // ADD SYSTEM CONFIG
+            foreach (var Kvp in SystemConfig)
+            {
+                Merged[Kvp.Key] = Kvp.Value;
+            }
+
+            // OVERRIDE WITH GLOBAL CONFIG
+            foreach (var Kvp in GlobalConfig)
+            {
+                Merged[Kvp.Key] = Kvp.Value;
+            }
+
+            // OVERRIDE WITH LOCAL CONFIG
+            foreach (var Kvp in LocalConfig)
+            {
+                Merged[Kvp.Key] = Kvp.Value;
+            }
+
+            return Merged;
+        }
+
+        // VALIDATE CONFIG KEY FORMAT
+        public static bool IsValidConfigKey(string Key)
+        {
+            if (string.IsNullOrWhiteSpace(Key))
+            {
+                return false;
+            }
+
+            // KEY SHOULD BE IN FORMAT "section.subsection.name"
+            return System.Text.RegularExpressions.Regex.IsMatch(Key, @"^[a-z0-9]+(\.[a-z0-9]+)*$", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        // PARSE CONFIG KEY
+        public static (string Section, string Subsection, string Name) ParseConfigKey(string Key)
+        {
+            var Parts = Key.Split('.');
+            
+            if (Parts.Length == 2)
+            {
+                return (Parts[0], null, Parts[1]);
+            }
+            else if (Parts.Length == 3)
+            {
+                return (Parts[0], Parts[1], Parts[2]);
+            }
+            else if (Parts.Length == 1)
+            {
+                return (Parts[0], null, null);
+            }
+
+            return (null, null, null);
+        }
+
+        // FORMAT CONFIG KEY
+        public static string FormatConfigKey(string Section, string Subsection, string Name)
+        {
+            if (string.IsNullOrEmpty(Subsection))
+            {
+                return $"{Section}.{Name}";
+            }
+            else
+            {
+                return $"{Section}.{Subsection}.{Name}";
+            }
+        }
+
+        // GET CONFIG SECTION
+        public static Dictionary<string, string> GetConfigSection(
+            Dictionary<string, string> Config, 
+            string Section)
+        {
+            var SectionConfig = new Dictionary<string, string>();
+            var Prefix = $"{Section}.";
+
+            foreach (var Kvp in Config)
+            {
+                if (Kvp.Key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var Key = Kvp.Key.Substring(Prefix.Length);
+                    SectionConfig[Key] = Kvp.Value;
+                }
+            }
+
+            return SectionConfig;
+        }
+
+        // EXPORT CONFIG TO INI FORMAT
+        public static string ExportToIni(Dictionary<string, string> Config)
+        {
+            var Builder = new System.Text.StringBuilder();
+            var Sections = new Dictionary<string, List<(string Key, string Value)>>();
+
+            // GROUP BY SECTION
+            foreach (var Kvp in Config)
+            {
+                var Parsed = ParseConfigKey(Kvp.Key);
+                var Section = Parsed.Section ?? "general";
+                
+                if (!Sections.ContainsKey(Section))
+                {
+                    Sections[Section] = new List<(string, string)>();
+                }
+
+                var Key = string.IsNullOrEmpty(Parsed.Subsection) 
+                    ? Parsed.Name 
+                    : $"{Parsed.Subsection}.{Parsed.Name}";
+
+                Sections[Section].Add((Key, Kvp.Value));
+            }
+
+            // WRITE SECTIONS
+            foreach (var Section in Sections)
+            {
+                Builder.AppendLine($"[{Section.Key}]");
+                
+                foreach (var Entry in Section.Value)
+                {
+                    Builder.AppendLine($"{Entry.Key} = {Entry.Value}");
+                }
+
+                Builder.AppendLine();
+            }
+
+            return Builder.ToString();
+        }
+
+        // IMPORT CONFIG FROM INI FORMAT
+        public static Dictionary<string, string> ImportFromIni(string IniContent)
+        {
+            var Config = new Dictionary<string, string>();
+            var Lines = IniContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            string CurrentSection = "general";
+
+            foreach (var Line in Lines)
+            {
+                var Trimmed = Line.Trim();
+
+                if (string.IsNullOrWhiteSpace(Trimmed) || Trimmed.StartsWith("#") || Trimmed.StartsWith(";"))
+                {
+                    continue;
+                }
+
+                // SECTION HEADER
+                if (Trimmed.StartsWith("[") && Trimmed.EndsWith("]"))
+                {
+                    CurrentSection = Trimmed.Substring(1, Trimmed.Length - 2).Trim();
+                    continue;
+                }
+
+                // KEY-VALUE PAIR
+                var Parts = Trimmed.Split(new[] { '=' }, 2);
+                
+                if (Parts.Length == 2)
+                {
+                    var Key = Parts[0].Trim();
+                    var Value = Parts[1].Trim();
+                    var FullKey = $"{CurrentSection}.{Key}";
+                    Config[FullKey] = Value;
+                }
+            }
+
+            return Config;
+        }
+    }
+}

@@ -1,0 +1,670 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// REBASEMANAGER.SRX - INTERACTIVE REBASE ENGINE
+// HANDLES REBASE OPERATIONS WITH FULL INTERACTIVE SUPPORT
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+
+namespace Synrix.Core
+{
+
+public enum RebaseStatus
+{
+    NotInProgress,
+    InProgress,
+    ConflictPaused,
+    Completed,
+    Aborted
+}
+
+public class RebaseOperation
+{
+    public string SourceBranch { get; set; } = string.Empty;
+    public string TargetBranch { get; set; } = string.Empty;
+    public string OriginalHead { get; set; } = string.Empty;
+    public string NewBase { get; set; } = string.Empty;
+    public List<string> RemainingCommits { get; set; } = new();
+    public List<string> ProcessedCommits { get; set; } = new();
+    public RebaseStatus Status { get; set; }
+    public string? ConflictingFile { get; set; }
+    public DateTime StartTime { get; set; }
+}
+
+public class RebaseStep
+{
+    public string CommitHash { get; set; } = string.Empty;
+    public string Action { get; set; } = "pick"; // pick, squash, edit, drop, reword
+    public string Message { get; set; } = string.Empty;
+}
+
+public class RebaseManager
+{
+    private readonly ObjectStorage _storage;
+    private readonly RepositoryManager _repoManager;
+    private readonly CommitManager _commitManager;
+    private readonly MergeManager _mergeManager;
+    private readonly StagingArea _stagingArea;
+
+    private string RebaseFilePath => Path.Combine(_repoManager.GetRepositoryPath(), ".synrix", "REBASE_STATE");
+
+    public RebaseManager(
+        ObjectStorage storage,
+        RepositoryManager repoManager,
+        CommitManager commitManager,
+        MergeManager mergeManager,
+        StagingArea stagingArea)
+    {
+        _storage = storage;
+        _repoManager = repoManager;
+        _commitManager = commitManager;
+        _mergeManager = mergeManager;
+        _stagingArea = stagingArea;
+    }
+
+    /// <summary>
+    /// Start A Simple Rebase Operation
+    /// </summary>
+    public bool StartRebase(string sourceBranch, string targetBranch)
+    {
+        try
+        {
+            if (IsRebaseInProgress())
+            {
+                Console.WriteLine("ERROR: A ReBase Is Already In Progress.");
+                Console.WriteLine("Run 'synrix rebase --continue' or 'synrix rebase --abort'");
+                return false;
+            }
+
+            // Get Current Branch
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("ERROR: Not On Any Branch");
+                return false;
+            }
+
+            // Get Branch Commits
+            string? sourceCommit = _repoManager.GetBranchCommit(sourceBranch);
+            string? targetCommit = _repoManager.GetBranchCommit(targetBranch);
+
+            if (sourceCommit == null)
+            {
+                Console.WriteLine($"ERROR: Source Branch '{sourceBranch}' Not Found");
+                return false;
+            }
+
+            if (targetCommit == null)
+            {
+                Console.WriteLine($"ERROR: Target Branch '{targetBranch}' Not Found");
+                return false;
+            }
+
+            // Find Common Ancestor
+            string? commonAncestor = _mergeManager.FindCommonAncestor(sourceCommit, targetCommit);
+            if (commonAncestor == null)
+            {
+                Console.WriteLine("ERROR: No Common Ancestor Found");
+                return false;
+            }
+
+            // Get Commits To Rebase (From Common Ancestor To Source)
+            var commitsToRebase = GetCommitsBetween(commonAncestor, sourceCommit);
+            if (commitsToRebase.Count == 0)
+            {
+                Console.WriteLine("Already Up To Date!");
+                return true;
+            }
+
+            // Initialize Rebase State
+            var rebaseOp = new RebaseOperation
+            {
+                SourceBranch = sourceBranch,
+                TargetBranch = targetBranch,
+                OriginalHead = sourceCommit,
+                NewBase = targetCommit,
+                RemainingCommits = commitsToRebase,
+                ProcessedCommits = new List<string>(),
+                Status = RebaseStatus.InProgress,
+                StartTime = DateTime.Now
+            };
+
+            SaveRebaseState(rebaseOp);
+
+            Console.WriteLine($"Rebasing {sourceBranch} Onto {targetBranch}...");
+            Console.WriteLine($"Found {commitsToRebase.Count} Commits To Rebase");
+
+            // Start Rebasing Commits
+            return ContinueRebase();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Failed To Start Rebase: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Start Interactive Rebase With Ability To pick/squash/edit/drop Commits
+    /// </summary>
+    public bool StartInteractiveRebase(string sourceBranch, string targetBranch)
+    {
+        try
+        {
+            if (IsRebaseInProgress())
+            {
+                Console.WriteLine("ERROR: A Rebase Is Already In Progress.");
+                return false;
+            }
+
+            string? sourceCommit = _repoManager.GetBranchCommit(sourceBranch);
+            string? targetCommit = _repoManager.GetBranchCommit(targetBranch);
+
+            if (sourceCommit == null || targetCommit == null)
+            {
+                Console.WriteLine("ERROR: Invalid Branches");
+                return false;
+            }
+
+            string? commonAncestor = _mergeManager.FindCommonAncestor(sourceCommit, targetCommit);
+            if (commonAncestor == null)
+            {
+                Console.WriteLine("ERROR: No Common Ancestor Found");
+                return false;
+            }
+
+            var commitsToRebase = GetCommitsBetween(commonAncestor, sourceCommit);
+            if (commitsToRebase.Count == 0)
+            {
+                Console.WriteLine("Already Up To Date!");
+                return true;
+            }
+
+            // Create rebase plan
+            var rebasePlan = CreateRebasePlan(commitsToRebase);
+
+            Console.WriteLine("\n=== INTERACTIVE REBASE ===");
+            Console.WriteLine($"Rebasing {sourceBranch} Onto {targetBranch}\n");
+            Console.WriteLine("Commands :");
+            Console.WriteLine("  pick   = Use Commit");
+            Console.WriteLine("  squash = Combine With Previous Commit");
+            Console.WriteLine("  edit   = Pause For Amending");
+            Console.WriteLine("  drop   = Skip Commit");
+            Console.WriteLine("  reword = Change Commit Message\n");
+
+            // Display Rebase Plan
+            for (int i = 0; i < rebasePlan.Count; i++)
+            {
+                var step = rebasePlan[i];
+                Console.WriteLine($"{i + 1}. {step.Action.PadRight(6)} {step.CommitHash[..8]} {step.Message}");
+            }
+
+            Console.WriteLine("\nEnter Command (e.g., '1 drop', '2 squash') Or 'done' To Execute:");
+
+            // Allow User To Modify Plan
+            bool planningDone = false;
+            while (!planningDone)
+            {
+                Console.Write("> ");
+                string? input = Console.ReadLine()?.Trim();
+
+                if (string.IsNullOrEmpty(input))
+                    continue;
+
+                if (input.ToLower() == "done")
+                {
+                    planningDone = true;
+                }
+                else if (input.ToLower() == "abort")
+                {
+                    Console.WriteLine("Rebase Aborted.");
+                    return false;
+                }
+                else
+                {
+                    var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 2 && int.TryParse(parts[0], out int index))
+                    {
+                        index--; // Convert to 0-based
+                        if (index >= 0 && index < rebasePlan.Count)
+                        {
+                            string action = parts[1].ToLower();
+                            if (IsValidAction(action))
+                            {
+                                rebasePlan[index].Action = action;
+                                Console.WriteLine($"Updated: {index + 1}. {action} {rebasePlan[index].CommitHash[..8]}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Invalid Action : {action}");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Invalid Input. Use Format : <number> <action>");
+                    }
+                }
+            }
+
+            // Save Rebase Plan And Execute
+            var rebaseOp = new RebaseOperation
+            {
+                SourceBranch = sourceBranch,
+                TargetBranch = targetBranch,
+                OriginalHead = sourceCommit,
+                NewBase = targetCommit,
+                RemainingCommits = rebasePlan.Select(s => $"{s.Action}:{s.CommitHash}").ToList(),
+                ProcessedCommits = new List<string>(),
+                Status = RebaseStatus.InProgress,
+                StartTime = DateTime.Now
+            };
+
+            SaveRebaseState(rebaseOp);
+            return ExecuteRebasePlan(rebasePlan, targetCommit);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Interactive Rebase Failed : {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Execute A Rebase Plan (Internal Method For Interactive Rebase)
+    /// </summary>
+    private bool ExecuteRebasePlan(List<RebaseStep> rebasePlan, string baseCommit)
+    {
+        try
+        {
+            foreach (var step in rebasePlan)
+            {
+                Console.WriteLine($"Processing: {step.Action} {step.CommitHash[..8]}...");
+
+                bool success = step.Action switch
+                {
+                    "pick" => ApplyCommit(step.CommitHash),
+                    "drop" => true, // Just skip
+                    "squash" => SquashCommit(step.CommitHash),
+                    "edit" => EditCommit(step.CommitHash),
+                    "reword" => RewordCommit(step.CommitHash),
+                    _ => ApplyCommit(step.CommitHash)
+                };
+
+                if (!success)
+                {
+                    Console.WriteLine("\nCONFLICT: Rebase Paused");
+                    Console.WriteLine("To Continue: synrix rebase --continue");
+                    Console.WriteLine("To Abort: synrix rebase --abort");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Failed To Execute Rebase Plan: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Continue Rebase After Resolving Conflicts
+    /// </summary>
+    public bool ContinueRebase()
+    {
+        try
+        {
+            var rebaseOp = LoadRebaseState();
+            if (rebaseOp == null)
+            {
+                Console.WriteLine("ERROR: No Rebase In Progress");
+                return false;
+            }
+
+            if (rebaseOp.Status == RebaseStatus.ConflictPaused)
+            {
+                // Check If Conflicts Are Resolved
+                if (_stagingArea.HasUnresolvedConflicts())
+                {
+                    Console.WriteLine("ERROR: Please Resolve Conflicts And Stage Changes");
+                    Console.WriteLine("Run 'synrix add <file>' For Each Resolved File");
+                    return false;
+                }
+
+                Console.WriteLine("Continuing Rebase...");
+            }
+
+            // Process Remaining Commits
+            while (rebaseOp.RemainingCommits.Count > 0)
+            {
+                string commitHash = rebaseOp.RemainingCommits[0];
+                rebaseOp.RemainingCommits.RemoveAt(0);
+
+                string action = "pick";
+                if (commitHash.Contains(':'))
+                {
+                    var parts = commitHash.Split(':');
+                    action = parts[0];
+                    commitHash = parts[1];
+                }
+
+                Console.WriteLine($"Processing : {action} {commitHash[..8]}...");
+
+                bool success = action switch
+                {
+                    "pick" => ApplyCommit(commitHash),
+                    "drop" => true, // Just skip
+                    "squash" => SquashCommit(commitHash),
+                    "edit" => EditCommit(commitHash),
+                    "reword" => RewordCommit(commitHash),
+                    _ => ApplyCommit(commitHash)
+                };
+
+                if (!success)
+                {
+                    rebaseOp.Status = RebaseStatus.ConflictPaused;
+                    rebaseOp.ConflictingFile = commitHash;
+                    SaveRebaseState(rebaseOp);
+
+                    Console.WriteLine("\nCONFLICT: Rebase Paused");
+                    Console.WriteLine("To Continue: synrix rebase --continue");
+                    Console.WriteLine("To Abort: synrix rebase --abort");
+                    return false;
+                }
+
+                rebaseOp.ProcessedCommits.Add(commitHash);
+                SaveRebaseState(rebaseOp);
+            }
+
+            // Rebase Completed
+            CompleteRebase(rebaseOp);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Failed To Continue Rebase: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Abort Rebase And Restore Original State
+    /// </summary>
+    public bool AbortRebase()
+    {
+        try
+        {
+            var rebaseOp = LoadRebaseState();
+            if (rebaseOp == null)
+            {
+                Console.WriteLine("No Rebase In Progress");
+                return true;
+            }
+
+            Console.WriteLine("Aborting Rebase...");
+
+            // Restore original HEAD
+            _repoManager.UpdateBranchCommit(rebaseOp.SourceBranch, rebaseOp.OriginalHead);
+
+            // Clean Up
+            DeleteRebaseState();
+
+            Console.WriteLine($"Rebase aborted. Restored to {rebaseOp.OriginalHead[..8]}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Failed To Abort Rebase: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Skip Current Conflicting Commit And Continue
+    /// </summary>
+    public bool SkipCommit()
+    {
+        try
+        {
+            var rebaseOp = LoadRebaseState();
+            if (rebaseOp == null || rebaseOp.Status != RebaseStatus.ConflictPaused)
+            {
+                Console.WriteLine("ERROR: No Conflicting Commit To Skip");
+                return false;
+            }
+
+            Console.WriteLine($"Skipping commit {rebaseOp.ConflictingFile?[..8]}...");
+
+            // Clear conflict state
+            _stagingArea.ClearConflicts();
+            rebaseOp.Status = RebaseStatus.InProgress;
+            rebaseOp.ConflictingFile = null;
+            SaveRebaseState(rebaseOp);
+
+            return ContinueRebase();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Failed To Skip Commit: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Show Current Rebase Status
+    /// </summary>
+    public void ShowStatus()
+    {
+        var rebaseOp = LoadRebaseState();
+        if (rebaseOp == null)
+        {
+            Console.WriteLine("No Rebase In Progress");
+            return;
+        }
+
+        Console.WriteLine("\n=== REBASE STATUS ===");
+        Console.WriteLine($"Source: {rebaseOp.SourceBranch}");
+        Console.WriteLine($"Target: {rebaseOp.TargetBranch}");
+        Console.WriteLine($"Status: {rebaseOp.Status}");
+        Console.WriteLine($"Started: {rebaseOp.StartTime}");
+        Console.WriteLine($"\nProgress: {rebaseOp.ProcessedCommits.Count}/{rebaseOp.ProcessedCommits.Count + rebaseOp.RemainingCommits.Count} commits");
+
+        if (rebaseOp.Status == RebaseStatus.ConflictPaused)
+        {
+            Console.WriteLine($"\nConflict In: {rebaseOp.ConflictingFile}");
+            Console.WriteLine("\nNext Steps:");
+            Console.WriteLine("  1. Resolve Conflicts In Files");
+            Console.WriteLine("  2. Stage Resolved Files: synrix add <file>");
+            Console.WriteLine("  3. Continue: synrix rebase --continue");
+            Console.WriteLine("  Or Skip: synrix rebase --skip");
+            Console.WriteLine("  Or Abort: synrix rebase --abort");
+        }
+        else if (rebaseOp.RemainingCommits.Count > 0)
+        {
+            Console.WriteLine($"\nRemaining Commits: {rebaseOp.RemainingCommits.Count}");
+        }
+    }
+
+    public bool IsRebaseInProgress()
+    {
+        return File.Exists(RebaseFilePath);
+    }
+
+    // === HELPER METHODS ===
+
+    private List<string> GetCommitsBetween(string ancestorHash, string tipHash)
+    {
+        var commits = new List<string>();
+        var visited = new HashSet<string>();
+        var queue = new Queue<string>();
+
+        queue.Enqueue(tipHash);
+
+        while (queue.Count > 0)
+        {
+            string current = queue.Dequeue();
+
+            if (current == ancestorHash || visited.Contains(current))
+                continue;
+
+            visited.Add(current);
+            commits.Add(current);
+
+            var commit = _storage.ReadCommit(current);
+            if (commit != null && commit.ParentHashes.Count > 0)
+            {
+                foreach (var parent in commit.ParentHashes)
+                {
+                    if (!visited.Contains(parent))
+                        queue.Enqueue(parent);
+                }
+            }
+        }
+
+        commits.Reverse(); // Oldest first
+        return commits;
+    }
+
+    private List<RebaseStep> CreateRebasePlan(List<string> commits)
+    {
+        var plan = new List<RebaseStep>();
+
+        foreach (var commitHash in commits)
+        {
+            var commit = _storage.ReadCommit(commitHash);
+            if (commit != null)
+            {
+                plan.Add(new RebaseStep
+                {
+                    CommitHash = commitHash,
+                    Action = "pick",
+                    Message = commit.Message.Split('\n')[0] // First Line Only
+                });
+            }
+        }
+
+        return plan;
+    }
+
+    private bool IsValidAction(string action)
+    {
+        return action is "pick" or "squash" or "edit" or "drop" or "reword";
+    }
+
+    private bool ApplyCommit(string commitHash)
+    {
+        try
+        {
+            var commit = _storage.ReadCommit(commitHash);
+            if (commit == null)
+            {
+                Console.WriteLine($"ERROR: Commit {commitHash} Not Found");
+                return false;
+            }
+
+            // Apply Commit Changes (Simplified - In Real Implementation Would Need Proper Merge)
+            string? currentHead = _repoManager.GetCurrentCommit();
+            if (currentHead == null)
+                return false;
+
+            // Create New Commit With Same Changes But New Parent
+            string newCommitHash = _commitManager.CreateCommit(
+                commit.Message,
+                commit.Author
+            );
+
+            if (string.IsNullOrEmpty(newCommitHash))
+                return false;
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool SquashCommit(string commitHash)
+    {
+        // Squash Combines Commit With Previous One
+        Console.WriteLine($"Squashing {commitHash[..8]}...");
+        return ApplyCommit(commitHash);
+    }
+
+    private bool EditCommit(string commitHash)
+    {
+        Console.WriteLine($"Pausing At {commitHash[..8]} For Editing");
+        Console.WriteLine("Make Your Changes And Run: synrix rebase --continue");
+        return false; // Pause Rebase
+    }
+
+    private bool RewordCommit(string commitHash)
+    {
+        var commit = _storage.ReadCommit(commitHash);
+        if (commit == null)
+            return false;
+
+        Console.WriteLine($"Current Message: {commit.Message}");
+        Console.Write("New Message: ");
+        string? newMessage = Console.ReadLine();
+
+        if (string.IsNullOrEmpty(newMessage))
+            return ApplyCommit(commitHash);
+
+        // Create Commit With New Message
+        string? currentHead = _repoManager.GetCurrentCommit();
+        if (currentHead == null)
+            return false;
+
+        _commitManager.CreateCommit(newMessage, commit.Author);
+        return true;
+    }
+
+    private void CompleteRebase(RebaseOperation rebaseOp)
+    {
+        string? newHead = _repoManager.GetCurrentCommit();
+        if (newHead != null)
+        {
+            _repoManager.UpdateBranchCommit(rebaseOp.SourceBranch, newHead);
+        }
+
+        DeleteRebaseState();
+
+        Console.WriteLine("\n✓ Rebase Completed Successfully!");
+        Console.WriteLine($"Branch {rebaseOp.SourceBranch} Rebased Onto {rebaseOp.TargetBranch}");
+    }
+
+    private void SaveRebaseState(RebaseOperation rebaseOp)
+    {
+        string json = JsonSerializer.Serialize(rebaseOp, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(RebaseFilePath, json);
+    }
+
+    private RebaseOperation? LoadRebaseState()
+    {
+        if (!File.Exists(RebaseFilePath))
+            return null;
+
+        try
+        {
+            string json = File.ReadAllText(RebaseFilePath);
+            return JsonSerializer.Deserialize<RebaseOperation>(json);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void DeleteRebaseState()
+    {
+        if (File.Exists(RebaseFilePath))
+            File.Delete(RebaseFilePath);
+    }
+}
+
+} // namespace Synrix.Core

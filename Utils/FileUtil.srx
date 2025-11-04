@@ -1,0 +1,257 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// FILEUTIL.SRX - FILE UTILITY FUNCTIONS
+// HELPER FUNCTIONS FOR FILE OPERATIONS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Utils
+{
+    public static class FileUtil
+    {
+        // READ FILE CONTENT AS BYTES
+        public static byte[] ReadFileBytes(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            return File.ReadAllBytes(FilePath);
+        }
+
+        // READ FILE CONTENT AS STRING
+        public static string ReadFileText(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            return File.ReadAllText(FilePath);
+        }
+
+        // WRITE BYTES TO FILE
+        public static void WriteFileBytes(string FilePath, byte[] Content)
+        {
+            var Directory = Path.GetDirectoryName(FilePath);
+            if (!string.IsNullOrEmpty(Directory))
+            {
+                System.IO.Directory.CreateDirectory(Directory);
+            }
+
+            File.WriteAllBytes(FilePath, Content);
+        }
+
+        // WRITE TEXT TO FILE
+        public static void WriteFileText(string FilePath, string Content)
+        {
+            var Directory = Path.GetDirectoryName(FilePath);
+            if (!string.IsNullOrEmpty(Directory))
+            {
+                System.IO.Directory.CreateDirectory(Directory);
+            }
+
+            File.WriteAllText(FilePath, Content);
+        }
+
+        // GET RELATIVE PATH
+        public static string GetRelativePath(string RootPath, string FullPath)
+        {
+            var RootUri = new Uri(RootPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar);
+            var FullUri = new Uri(FullPath);
+            var RelativeUri = RootUri.MakeRelativeUri(FullUri);
+            return Uri.UnescapeDataString(RelativeUri.ToString().Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        // NORMALIZE PATH (CONVERT TO FORWARD SLASHES)
+        public static string NormalizePath(string Path)
+        {
+            return Path?.Replace('\\', '/').TrimStart('/');
+        }
+
+        // CHECK IF PATH IS UNDER ROOT
+        public static bool IsPathUnderRoot(string RootPath, string TargetPath)
+        {
+            var FullRoot = Path.GetFullPath(RootPath);
+            var FullTarget = Path.GetFullPath(TargetPath);
+            return FullTarget.StartsWith(FullRoot, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // COPY FILE
+        public static void CopyFile(string SourcePath, string DestPath, bool Overwrite = false)
+        {
+            if (!File.Exists(SourcePath))
+            {
+                throw new FileNotFoundException($"SOURCE FILE NOT FOUND: {SourcePath}");
+            }
+
+            var DestDirectory = Path.GetDirectoryName(DestPath);
+            if (!string.IsNullOrEmpty(DestDirectory))
+            {
+                System.IO.Directory.CreateDirectory(DestDirectory);
+            }
+
+            File.Copy(SourcePath, DestPath, Overwrite);
+        }
+
+        // MOVE FILE
+        public static void MoveFile(string SourcePath, string DestPath)
+        {
+            if (!File.Exists(SourcePath))
+            {
+                throw new FileNotFoundException($"SOURCE FILE NOT FOUND: {SourcePath}");
+            }
+
+            var DestDirectory = Path.GetDirectoryName(DestPath);
+            if (!string.IsNullOrEmpty(DestDirectory))
+            {
+                System.IO.Directory.CreateDirectory(DestDirectory);
+            }
+
+            File.Move(SourcePath, DestPath);
+        }
+
+        // DELETE FILE
+        public static void DeleteFile(string FilePath)
+        {
+            if (File.Exists(FilePath))
+            {
+                File.Delete(FilePath);
+            }
+        }
+
+        // GET FILE SIZE
+        public static long GetFileSize(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            var FileInfo = new FileInfo(FilePath);
+            return FileInfo.Length;
+        }
+
+        // GET FILE MODIFICATION TIME
+        public static DateTime GetFileModificationTime(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            var FileInfo = new FileInfo(FilePath);
+            return FileInfo.LastWriteTime;
+        }
+
+        // CHECK IF FILE IS BINARY
+        public static bool IsBinaryFile(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            var Buffer = new byte[8192];
+            int BytesRead;
+
+            using (var Stream = File.OpenRead(FilePath))
+            {
+                BytesRead = Stream.Read(Buffer, 0, Buffer.Length);
+            }
+
+            // CHECK FOR NULL BYTES (INDICATOR OF BINARY FILE)
+            for (int I = 0; I < BytesRead; I++)
+            {
+                if (Buffer[I] == 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // GET FILE EXTENSION
+        public static string GetFileExtension(string FilePath)
+        {
+            return Path.GetExtension(FilePath)?.ToLower();
+        }
+
+        // GET FILE NAME WITHOUT EXTENSION
+        public static string GetFileNameWithoutExtension(string FilePath)
+        {
+            return Path.GetFileNameWithoutExtension(FilePath);
+        }
+
+        // LIST FILES IN DIRECTORY
+        public static List<string> ListFiles(string DirectoryPath, bool Recursive = false)
+        {
+            if (!System.IO.Directory.Exists(DirectoryPath))
+            {
+                throw new DirectoryNotFoundException($"DIRECTORY NOT FOUND: {DirectoryPath}");
+            }
+
+            var SearchOption = Recursive ? System.IO.SearchOption.AllDirectories : System.IO.SearchOption.TopDirectoryOnly;
+            return System.IO.Directory.GetFiles(DirectoryPath, "*", SearchOption).ToList();
+        }
+
+        // LIST DIRECTORIES
+        public static List<string> ListDirectories(string DirectoryPath, bool Recursive = false)
+        {
+            if (!System.IO.Directory.Exists(DirectoryPath))
+            {
+                throw new DirectoryNotFoundException($"DIRECTORY NOT FOUND: {DirectoryPath}");
+            }
+
+            var SearchOption = Recursive ? System.IO.SearchOption.AllDirectories : System.IO.SearchOption.TopDirectoryOnly;
+            return System.IO.Directory.GetDirectories(DirectoryPath, "*", SearchOption).ToList();
+        }
+
+        // CREATE DIRECTORY
+        public static void CreateDirectory(string DirectoryPath)
+        {
+            System.IO.Directory.CreateDirectory(DirectoryPath);
+        }
+
+        // DELETE DIRECTORY
+        public static void DeleteDirectory(string DirectoryPath, bool Recursive = false)
+        {
+            if (System.IO.Directory.Exists(DirectoryPath))
+            {
+                System.IO.Directory.Delete(DirectoryPath, Recursive);
+            }
+        }
+
+        // CHECK IF DIRECTORY IS EMPTY
+        public static bool IsDirectoryEmpty(string DirectoryPath)
+        {
+            if (!System.IO.Directory.Exists(DirectoryPath))
+            {
+                throw new DirectoryNotFoundException($"DIRECTORY NOT FOUND: {DirectoryPath}");
+            }
+
+            return !System.IO.Directory.EnumerateFileSystemEntries(DirectoryPath).Any();
+        }
+
+        // FORMAT FILE SIZE
+        public static string FormatFileSize(long Bytes)
+        {
+            string[] Suffixes = { "B", "KB", "MB", "GB", "TB" };
+            int SuffixIndex = 0;
+            double Size = Bytes;
+
+            while (Size >= 1024 && SuffixIndex < Suffixes.Length - 1)
+            {
+                Size /= 1024;
+                SuffixIndex++;
+            }
+
+            return $"{Size:0.##} {Suffixes[SuffixIndex]}";
+        }
+    }
+}

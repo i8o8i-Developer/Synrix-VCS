@@ -1,0 +1,535 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// BRANCHMANAGER.SRX - BRANCH OPERATIONS
+// HANDLES BRANCH CREATION, SWITCHING, LISTING, DELETION, AND MANAGEMENT
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+namespace Synrix.Core
+{
+    // BRANCH INFORMATION
+    public class BranchInfo
+    {
+        public string Name { get; set; }
+        public string CommitHash { get; set; }
+        public bool IsCurrent { get; set; }
+        public DateTime LastCommitDate { get; set; }
+        public string LastCommitMessage { get; set; }
+
+        public string ShortHash => CommitHash?.Substring(0, Math.Min(7, CommitHash?.Length ?? 0));
+    }
+
+    // BRANCH MANAGER
+    public class BranchManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string RefsPath;
+        private readonly string HeadsPath;
+        private readonly RepositoryManager RepoManager;
+        private readonly CommitManager CommitMgr;
+        private readonly StagingArea Staging;
+        private readonly ObjectStorage Storage;
+
+        public BranchManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            RefsPath = Path.Combine(RepositoryPath, ".synrix", "refs");
+            HeadsPath = Path.Combine(RefsPath, "heads");
+            RepoManager = new RepositoryManager(RepositoryPath);
+            CommitMgr = new CommitManager(RepositoryPath);
+            Staging = new StagingArea(RepositoryPath);
+            Storage = new ObjectStorage(RepositoryPath);
+        }
+
+        // CREATE A NEW BRANCH
+        public void CreateBranch(string BranchName, string StartPoint = null)
+        {
+            if (string.IsNullOrWhiteSpace(BranchName))
+            {
+                throw new ArgumentException("BRANCH NAME CANNOT BE EMPTY");
+            }
+
+            if (!IsValidBranchName(BranchName))
+            {
+                throw new ArgumentException($"INVALID BRANCH NAME: {BranchName}");
+            }
+
+            var BranchPath = Path.Combine(HeadsPath, BranchName);
+
+            if (File.Exists(BranchPath))
+            {
+                throw new InvalidOperationException($"BRANCH ALREADY EXISTS: {BranchName}");
+            }
+
+            // RESOLVE START POINT
+            string CommitHash;
+            
+            if (string.IsNullOrEmpty(StartPoint))
+            {
+                CommitHash = RepoManager.GetCurrentCommit();
+                
+                if (string.IsNullOrEmpty(CommitHash))
+                {
+                    throw new InvalidOperationException("NO COMMITS YET - CANNOT CREATE BRANCH");
+                }
+            }
+            else
+            {
+                CommitHash = CommitMgr.ResolveReference(StartPoint);
+                
+                if (string.IsNullOrEmpty(CommitHash))
+                {
+                    throw new ArgumentException($"INVALID START POINT: {StartPoint}");
+                }
+            }
+
+            // CREATE BRANCH FILE
+            Directory.CreateDirectory(HeadsPath);
+            File.WriteAllText(BranchPath, CommitHash);
+
+            Console.WriteLine($"CREATED BRANCH: {BranchName}");
+        }
+
+        // SWITCH TO A BRANCH
+        public void SwitchBranch(string BranchName, bool CreateIfNotExists = false)
+        {
+            if (string.IsNullOrWhiteSpace(BranchName))
+            {
+                throw new ArgumentException("BRANCH NAME CANNOT BE EMPTY");
+            }
+
+            var BranchPath = Path.Combine(HeadsPath, BranchName);
+
+            // CREATE BRANCH IF IT DOESN'T EXIST AND FLAG IS SET
+            if (!File.Exists(BranchPath) && CreateIfNotExists)
+            {
+                CreateBranch(BranchName);
+            }
+
+            if (!File.Exists(BranchPath))
+            {
+                throw new InvalidOperationException($"BRANCH NOT FOUND: {BranchName}");
+            }
+
+            // CHECK FOR UNCOMMITTED CHANGES
+            var Status = RepoManager.GetStatus();
+            if (Status.ModifiedFiles.Count > 0 || Status.DeletedFiles.Count > 0)
+            {
+                Console.WriteLine("WARNING: YOU HAVE UNCOMMITTED CHANGES");
+                Console.WriteLine("CHANGES WILL BE KEPT IN WORKING DIRECTORY");
+            }
+
+            // GET TARGET COMMIT
+            var TargetCommit = File.ReadAllText(BranchPath).Trim();
+
+            // CHECKOUT TREE
+            CheckoutCommit(TargetCommit);
+
+            // UPDATE HEAD
+            RepoManager.UpdateHead($"refs/heads/{BranchName}", true);
+
+            Console.WriteLine($"SWITCHED TO BRANCH: {BranchName}");
+        }
+
+        // CHECKOUT A SPECIFIC COMMIT
+        public void CheckoutCommit(string CommitReference)
+        {
+            var CommitHash = CommitMgr.ResolveReference(CommitReference);
+            
+            if (string.IsNullOrEmpty(CommitHash))
+            {
+                throw new ArgumentException($"INVALID COMMIT: {CommitReference}");
+            }
+
+            // GET COMMIT OBJECT
+            var CommitObj = Storage.GetCommit(CommitHash);
+
+            // RESTORE WORKING DIRECTORY FROM TREE
+            CleanWorkingDirectory();
+            Staging.RestoreFromTree(CommitObj.TreeHash);
+
+            // UPDATE INDEX
+            Staging.UpdateIndexFromTree(CommitObj.TreeHash);
+
+            Console.WriteLine($"CHECKED OUT COMMIT: {CommitHash.Substring(0, 7)}");
+        }
+
+        // DELETE A BRANCH
+        public void DeleteBranch(string BranchName, bool Force = false)
+        {
+            if (string.IsNullOrWhiteSpace(BranchName))
+            {
+                throw new ArgumentException("BRANCH NAME CANNOT BE EMPTY");
+            }
+
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            
+            if (CurrentBranch == BranchName)
+            {
+                throw new InvalidOperationException("CANNOT DELETE CURRENT BRANCH");
+            }
+
+            var BranchPath = Path.Combine(HeadsPath, BranchName);
+
+            if (!File.Exists(BranchPath))
+            {
+                throw new InvalidOperationException($"BRANCH NOT FOUND: {BranchName}");
+            }
+
+            // CHECK IF BRANCH IS MERGED (UNLESS FORCE)
+            if (!Force)
+            {
+                var BranchCommit = File.ReadAllText(BranchPath).Trim();
+                var CurrentCommit = RepoManager.GetCurrentCommit();
+
+                if (!IsAncestor(BranchCommit, CurrentCommit))
+                {
+                    throw new InvalidOperationException($"BRANCH NOT MERGED - USE FORCE TO DELETE");
+                }
+            }
+
+            File.Delete(BranchPath);
+            Console.WriteLine($"DELETED BRANCH: {BranchName}");
+        }
+
+        // LIST ALL BRANCHES
+        public List<BranchInfo> ListBranches()
+        {
+            var Branches = new List<BranchInfo>();
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+
+            if (!Directory.Exists(HeadsPath))
+            {
+                return Branches;
+            }
+
+            foreach (var BranchFile in Directory.GetFiles(HeadsPath))
+            {
+                var BranchName = Path.GetFileName(BranchFile);
+                var CommitHash = File.ReadAllText(BranchFile).Trim();
+
+                var Info = new BranchInfo
+                {
+                    Name = BranchName,
+                    CommitHash = CommitHash,
+                    IsCurrent = BranchName == CurrentBranch
+                };
+
+                // GET COMMIT INFO
+                try
+                {
+                    var Commit = Storage.GetCommit(CommitHash);
+                    Info.LastCommitDate = Commit.Timestamp;
+                    Info.LastCommitMessage = Commit.Message.Split('\n')[0];
+                }
+                catch
+                {
+                    Info.LastCommitMessage = "COMMIT NOT FOUND";
+                }
+
+                Branches.Add(Info);
+            }
+
+            return Branches.OrderBy(b => b.Name).ToList();
+        }
+
+        // DISPLAY BRANCHES
+        public void ShowBranches(bool Verbose = false)
+        {
+            var Branches = ListBranches();
+
+            if (Branches.Count == 0)
+            {
+                Console.WriteLine("NO BRANCHES YET");
+                return;
+            }
+
+            foreach (var Branch in Branches)
+            {
+                var Prefix = Branch.IsCurrent ? "* " : "  ";
+                
+                if (Verbose)
+                {
+                    Console.WriteLine($"{Prefix}{Branch.Name,-20} {Branch.ShortHash} {Branch.LastCommitMessage}");
+                }
+                else
+                {
+                    Console.WriteLine($"{Prefix}{Branch.Name}");
+                }
+            }
+        }
+
+        // RENAME BRANCH
+        public void RenameBranch(string OldName, string NewName)
+        {
+            if (string.IsNullOrWhiteSpace(OldName) || string.IsNullOrWhiteSpace(NewName))
+            {
+                throw new ArgumentException("BRANCH NAMES CANNOT BE EMPTY");
+            }
+
+            if (!IsValidBranchName(NewName))
+            {
+                throw new ArgumentException($"INVALID BRANCH NAME: {NewName}");
+            }
+
+            var OldPath = Path.Combine(HeadsPath, OldName);
+            var NewPath = Path.Combine(HeadsPath, NewName);
+
+            if (!File.Exists(OldPath))
+            {
+                throw new InvalidOperationException($"BRANCH NOT FOUND: {OldName}");
+            }
+
+            if (File.Exists(NewPath))
+            {
+                throw new InvalidOperationException($"BRANCH ALREADY EXISTS: {NewName}");
+            }
+
+            File.Move(OldPath, NewPath);
+
+            // UPDATE HEAD IF RENAMING CURRENT BRANCH
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            if (CurrentBranch == OldName)
+            {
+                RepoManager.UpdateHead($"refs/heads/{NewName}", true);
+            }
+
+            Console.WriteLine($"RENAMED BRANCH: {OldName} -> {NewName}");
+        }
+
+        // CHECK IF COMMIT IS ANCESTOR OF ANOTHER
+        private bool IsAncestor(string AncestorHash, string DescendantHash)
+        {
+            if (AncestorHash == DescendantHash)
+            {
+                return true;
+            }
+
+            var Visited = new HashSet<string>();
+            var Queue = new Queue<string>();
+            Queue.Enqueue(DescendantHash);
+
+            while (Queue.Count > 0)
+            {
+                var CurrentHash = Queue.Dequeue();
+
+                if (Visited.Contains(CurrentHash))
+                {
+                    continue;
+                }
+
+                Visited.Add(CurrentHash);
+
+                if (CurrentHash == AncestorHash)
+                {
+                    return true;
+                }
+
+                try
+                {
+                    var Commit = Storage.GetCommit(CurrentHash);
+                    foreach (var Parent in Commit.ParentHashes)
+                    {
+                        Queue.Enqueue(Parent);
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+
+            return false;
+        }
+
+        // VALIDATE BRANCH NAME
+        private bool IsValidBranchName(string Name)
+        {
+            if (string.IsNullOrWhiteSpace(Name))
+                return false;
+
+            // CANNOT START WITH DOT OR SLASH
+            if (Name.StartsWith(".") || Name.StartsWith("/"))
+                return false;
+
+            // CANNOT CONTAIN SPECIAL CHARACTERS
+            var InvalidChars = new[] { '~', '^', ':', '?', '*', '[', '\\', ' ' };
+            if (Name.Any(c => InvalidChars.Contains(c)))
+                return false;
+
+            // CANNOT END WITH DOT OR SLASH
+            if (Name.EndsWith(".") || Name.EndsWith("/"))
+                return false;
+
+            // CANNOT BE "HEAD"
+            if (Name.ToUpper() == "HEAD")
+                return false;
+
+            return true;
+        }
+
+        // CLEAN WORKING DIRECTORY
+        private void CleanWorkingDirectory()
+        {
+            // GET ALL TRACKED FILES
+            var IndexEntries = Staging.GetAllEntries();
+
+            // DELETE TRACKED FILES
+            foreach (var Entry in IndexEntries.Keys)
+            {
+                var FilePath = Path.Combine(RepositoryPath, Entry);
+                if (File.Exists(FilePath))
+                {
+                    try
+                    {
+                        File.Delete(FilePath);
+                    }
+                    catch (Exception Ex)
+                    {
+                        Console.WriteLine($"WARNING: COULD NOT DELETE {Entry}: {Ex.Message}");
+                    }
+                }
+            }
+
+            // REMOVE EMPTY DIRECTORIES
+            RemoveEmptyDirectories(RepositoryPath);
+        }
+
+        // REMOVE EMPTY DIRECTORIES
+        private void RemoveEmptyDirectories(string Path)
+        {
+            try
+            {
+                foreach (var Directory in System.IO.Directory.GetDirectories(Path))
+                {
+                    var DirName = System.IO.Path.GetFileName(Directory);
+                    
+                    if (DirName != ".synrix")
+                    {
+                        RemoveEmptyDirectories(Directory);
+                        
+                        if (System.IO.Directory.GetFiles(Directory).Length == 0 &&
+                            System.IO.Directory.GetDirectories(Directory).Length == 0)
+                        {
+                            System.IO.Directory.Delete(Directory);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // IGNORE ERRORS
+            }
+        }
+
+        // GET BRANCH COMMIT HASH
+        public string GetBranchCommit(string BranchName)
+        {
+            var BranchPath = Path.Combine(HeadsPath, BranchName);
+            
+            if (!File.Exists(BranchPath))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(BranchPath).Trim();
+        }
+
+        // CHECK IF BRANCH EXISTS
+        public bool BranchExists(string BranchName)
+        {
+            var BranchPath = Path.Combine(HeadsPath, BranchName);
+            return File.Exists(BranchPath);
+        }
+
+        // GET COMMON ANCESTOR OF TWO COMMITS
+        public string GetCommonAncestor(string Commit1, string Commit2)
+        {
+            var Ancestors1 = GetAllAncestors(Commit1);
+            var Ancestors2 = GetAllAncestors(Commit2);
+
+            // FIND COMMON ANCESTORS
+            var CommonAncestors = Ancestors1.Intersect(Ancestors2).ToList();
+
+            if (CommonAncestors.Count == 0)
+            {
+                return null;
+            }
+
+            // RETURN MOST RECENT COMMON ANCESTOR
+            return CommonAncestors[0];
+        }
+
+        // GET ALL ANCESTORS OF A COMMIT
+        private List<string> GetAllAncestors(string CommitHash)
+        {
+            var Ancestors = new List<string>();
+            var Visited = new HashSet<string>();
+            var Queue = new Queue<string>();
+            Queue.Enqueue(CommitHash);
+
+            while (Queue.Count > 0)
+            {
+                var CurrentHash = Queue.Dequeue();
+
+                if (Visited.Contains(CurrentHash))
+                {
+                    continue;
+                }
+
+                Visited.Add(CurrentHash);
+                Ancestors.Add(CurrentHash);
+
+                try
+                {
+                    var Commit = Storage.GetCommit(CurrentHash);
+                    foreach (var Parent in Commit.ParentHashes)
+                    {
+                        Queue.Enqueue(Parent);
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+
+            return Ancestors;
+        }
+
+        // SHOW BRANCH GRAPH
+        public void ShowGraph(int MaxCount = 20)
+        {
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                Console.WriteLine("NO COMMITS YET");
+                return;
+            }
+
+            var History = CommitMgr.GetHistory(CurrentCommit, MaxCount);
+            var Branches = ListBranches();
+
+            Console.WriteLine("COMMIT GRAPH:");
+            Console.WriteLine();
+
+            foreach (var Commit in History)
+            {
+                // FIND BRANCHES POINTING TO THIS COMMIT
+                var PointingBranches = Branches.Where(b => b.CommitHash == Commit.Hash).ToList();
+                var BranchNames = string.Join(", ", PointingBranches.Select(b => b.IsCurrent ? $"*{b.Name}" : b.Name));
+
+                var Prefix = PointingBranches.Any(b => b.IsCurrent) ? "* " : "  ";
+                var BranchInfo = string.IsNullOrEmpty(BranchNames) ? "" : $" ({BranchNames})";
+
+                Console.WriteLine($"{Prefix}{Commit.ShortHash}{BranchInfo}");
+                Console.WriteLine($"  {Commit.Message.Split('\n')[0]}");
+                Console.WriteLine($"  {Commit.Author} - {Commit.Timestamp:yyyy-MM-dd HH:mm}");
+                Console.WriteLine();
+            }
+        }
+    }
+}

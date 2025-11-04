@@ -1,0 +1,491 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// UNDOMANAGER.SRX - UNDO/REDO ENGINE
+// HANDLES SIMPLE UNDO/REDO OPERATIONS FOR ALL COMMANDS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+namespace Synrix.Core
+{
+
+public enum UndoableOperation
+{
+    Commit,
+    Merge,
+    Reset,
+    Branch,
+    Checkout,
+    Rebase,
+    Tag,
+    Stash,
+    Unknown
+}
+
+public class UndoManager
+{
+    private readonly ReflogManager _reflogManager;
+    private readonly RepositoryManager _repoManager;
+    private readonly BranchManager _branchManager;
+    private readonly ObjectStorage _storage;
+
+    public UndoManager(
+        ReflogManager reflogManager,
+        RepositoryManager repoManager,
+        BranchManager branchManager,
+        ObjectStorage storage)
+    {
+        _reflogManager = reflogManager;
+        _repoManager = repoManager;
+        _branchManager = branchManager;
+        _storage = storage;
+    }
+
+    /// <summary>
+    /// Undo The Last Operation
+    /// </summary>
+    public bool Undo(int stepsBack = 1)
+    {
+        try
+        {
+            if (stepsBack < 1)
+            {
+                Console.WriteLine("ERROR: Steps Must Be At Least 1");
+                return false;
+            }
+
+            Console.WriteLine($"Undoing Last {stepsBack} Operation(s)...\n");
+
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("ERROR: Not On Any Branch");
+                return false;
+            }
+
+            // Get Reflog Entries For Current Branch
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            if (reflog.Count == 0)
+            {
+                Console.WriteLine("No Operations To Undo");
+                return false;
+            }
+
+            if (stepsBack >= reflog.Count)
+            {
+                Console.WriteLine($"ERROR: Only {reflog.Count} Operations In History");
+                Console.WriteLine($"Cannot Undo {stepsBack} Steps");
+                return false;
+            }
+
+            // Get Target State (Current Is At Index 0, So Target Is At StepsBack)
+            var targetEntry = reflog[stepsBack];
+            var currentEntry = reflog[0];
+
+            // Show What We're Undoing
+            Console.WriteLine("UNDO PREVIEW:");
+            for (int i = 0; i < stepsBack; i++)
+            {
+                var entry = reflog[i];
+                Console.WriteLine($"  {i + 1}. {entry.Timestamp:yyyy-MM-dd HH:mm:ss} - {entry.Message}");
+                Console.WriteLine($"     {entry.OldValue?[..8]} → {entry.NewValue[..8]}");
+            }
+
+            Console.WriteLine($"\nThis Will Restore {currentBranch} To: {targetEntry.NewValue[..8]}");
+            Console.WriteLine($"Current: {currentEntry.NewValue[..8]}");
+            Console.WriteLine($"Target:  {targetEntry.NewValue[..8]}");
+
+            // Confirm
+            Console.Write("\nProceed With Undo? (y/N): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+            if (response != "y" && response != "yes")
+            {
+                Console.WriteLine("Undo Cancelled");
+                return false;
+            }
+
+            // Perform The Undo
+            return RestoreToReflogEntry(currentBranch, targetEntry, stepsBack);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Undo Failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Undo Specific Operation Type
+    /// </summary>
+    public bool UndoOperation(UndoableOperation operationType)
+    {
+        try
+        {
+            Console.WriteLine($"Undoing Last {operationType} Operation...\n");
+
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("ERROR: Not On Any Branch");
+                return false;
+            }
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            if (reflog.Count == 0)
+            {
+                Console.WriteLine("No Operations To Undo");
+                return false;
+            }
+
+            // Find The Last Operation Of Specified Type
+            int targetIndex = -1;
+            for (int i = 0; i < reflog.Count; i++)
+            {
+                var entry = reflog[i];
+                var detectedType = DetectOperationType(entry.Message);
+
+                if (detectedType == operationType)
+                {
+                    targetIndex = i + 1; // Undo To The State Before This Operation
+                    break;
+                }
+            }
+
+            if (targetIndex == -1)
+            {
+                Console.WriteLine($"No {operationType} Operation Found In Reflog");
+                return false;
+            }
+
+            if (targetIndex >= reflog.Count)
+            {
+                Console.WriteLine($"Cannot Undo {operationType} - No Previous State Available");
+                return false;
+            }
+
+            var targetEntry = reflog[targetIndex];
+
+            Console.WriteLine($"Found {operationType} Operation:");
+            Console.WriteLine($"  {reflog[targetIndex - 1].Timestamp:yyyy-MM-dd HH:mm:ss} - {reflog[targetIndex - 1].Message}");
+            Console.WriteLine($"  {reflog[targetIndex - 1].OldValue?[..8]} → {reflog[targetIndex - 1].NewValue[..8]}");
+            Console.WriteLine($"\nWill Restore To: {targetEntry.NewValue[..8]}");
+
+            Console.Write("\nProceed? (y/N): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+            if (response != "y" && response != "yes")
+            {
+                Console.WriteLine("Undo Cancelled");
+                return false;
+            }
+
+            return RestoreToReflogEntry(currentBranch, targetEntry, targetIndex);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Undo Operation Failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Show What Can Be Undone Without Actually Undoing
+    /// </summary>
+    public void ShowUndoableOperations(int count = 10)
+    {
+        try
+        {
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("Not On Any Branch");
+                return;
+            }
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            if (reflog.Count == 0)
+            {
+                Console.WriteLine("No Operations To Undo");
+                return;
+            }
+
+            Console.WriteLine($"\n=== UNDOABLE OPERATIONS ({currentBranch}) ===\n");
+
+            int displayCount = Math.Min(count, reflog.Count);
+            for (int i = 0; i < displayCount; i++)
+            {
+                var entry = reflog[i];
+                var opType = DetectOperationType(entry.Message);
+
+                string indicator = i == 0 ? "→ " : "  ";
+                Console.WriteLine($"{indicator}{i}. [{opType}] {entry.Message}");
+                Console.WriteLine($"   {entry.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"   {entry.OldValue?[..8] ?? "initial"} → {entry.NewValue[..8]}");
+                Console.WriteLine();
+            }
+
+            Console.WriteLine("USAGE:");
+            Console.WriteLine("  synrix undo          - Undo Last Operation");
+            Console.WriteLine("  synrix undo 3        - Undo Last 3 Operations");
+            Console.WriteLine("  synrix undo commit   - Undo Last Commit");
+            Console.WriteLine("  synrix undo merge    - Undo Last Merge");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Undo To A Specific Commit Hash
+    /// </summary>
+    public bool UndoToCommit(string commitHash)
+    {
+        try
+        {
+            // Validate commit exists
+            var commit = _storage.ReadCommit(commitHash);
+            if (commit == null)
+            {
+                Console.WriteLine($"ERROR: Commit {commitHash} Not Found");
+                return false;
+            }
+
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("ERROR: Not On Any Branch");
+                return false;
+            }
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+
+            // Find The Reflog Entry For This Commit
+            int targetIndex = -1;
+            for (int i = 0; i < reflog.Count; i++)
+            {
+                if (reflog[i].NewValue.StartsWith(commitHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    targetIndex = i;
+                    break;
+                }
+            }
+
+            if (targetIndex == -1)
+            {
+                Console.WriteLine($"ERROR: Commit {commitHash} Not Found In Reflog");
+                Console.WriteLine("Cannot Safely Undo To This Commit");
+                return false;
+            }
+
+            Console.WriteLine($"Undoing To Commit: {commitHash[..8]}");
+            Console.WriteLine($"This Will Undo {targetIndex} Operation(s)");
+
+            if (targetIndex > 0)
+            {
+                Console.WriteLine("\nOperations That Will Be Undone:");
+                for (int i = 0; i < targetIndex; i++)
+                {
+                    Console.WriteLine($"  {i + 1}. {reflog[i].Message}");
+                }
+            }
+
+            Console.Write("\nProceed? (y/N): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+            if (response != "y" && response != "yes")
+            {
+                Console.WriteLine("Undo Cancelled");
+                return false;
+            }
+
+            var targetEntry = reflog[targetIndex];
+            return RestoreToReflogEntry(currentBranch, targetEntry, targetIndex);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Redo An Undone Operation (Undo The Undo)
+    /// </summary>
+    public bool Redo()
+    {
+        try
+        {
+            Console.WriteLine("Redoing (Undo Of Undo)...\n");
+
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+            {
+                Console.WriteLine("ERROR: Not On Any Branch");
+                return false;
+            }
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            if (reflog.Count < 2)
+            {
+                Console.WriteLine("Nothing To Redo");
+                return false;
+            }
+
+            // Check If Last Operation Was An Undo
+            var lastEntry = reflog[0];
+            if (!lastEntry.Message.Contains("undo", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Last Operation Was Not An Undo");
+                Console.WriteLine("Redo Only Works After An Undo Operation");
+                return false;
+            }
+
+            // Redo By Going Back One Step (Before The Undo)
+            var targetEntry = reflog[1];
+
+            Console.WriteLine("REDO PREVIEW:");
+            Console.WriteLine($"  Last Operation: {lastEntry.Message}");
+            Console.WriteLine($"  Will Restore To: {targetEntry.OldValue?[..8]}");
+
+            Console.Write("\nProceed? (y/N): ");
+            string? response = Console.ReadLine()?.Trim().ToLower();
+            if (response != "y" && response != "yes")
+            {
+                Console.WriteLine("Redo Cancelled");
+                return false;
+            }
+
+            // Restore To The State Before Undo
+            _repoManager.UpdateBranchCommit(currentBranch, targetEntry.OldValue ?? targetEntry.NewValue);
+            _reflogManager.LogRefChange(
+                $"refs/heads/{currentBranch}",
+                lastEntry.NewValue,
+                targetEntry.OldValue ?? targetEntry.NewValue,
+                "redo: restored previous state"
+            );
+
+            Console.WriteLine($"\n✓ Redo Successful!");
+            Console.WriteLine($"Restored {currentBranch} To {targetEntry.OldValue?[..8]}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Redo Failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    // === HELPER METHODS ===
+
+    private bool RestoreToReflogEntry(string branchName, ReflogEntry targetEntry, int stepsBack)
+    {
+        try
+        {
+            string? currentCommit = _repoManager.GetCurrentCommit();
+            string targetCommit = targetEntry.NewValue;
+
+            // Update Branch To Target Commit
+            _repoManager.UpdateBranchCommit(branchName, targetCommit);
+
+            // Log the undo operation
+            _reflogManager.LogRefChange(
+                $"refs/heads/{branchName}",
+                currentCommit ?? string.Empty,
+                targetCommit,
+                $"undo: Restored To {targetCommit[..8]} ({stepsBack} Steps Back)"
+            );
+
+            Console.WriteLine($"\n✓ Undo Successful!");
+            Console.WriteLine($"Branch {branchName} Restored To: {targetCommit[..8]}");
+            Console.WriteLine($"\nNote: Run 'synrix redo' To Reverse This Undo");
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR: Restore Failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private UndoableOperation DetectOperationType(string message)
+    {
+        string lower = message.ToLower();
+
+        if (lower.Contains("commit:") || lower.Contains("initial commit"))
+            return UndoableOperation.Commit;
+        if (lower.Contains("merge"))
+            return UndoableOperation.Merge;
+        if (lower.Contains("reset"))
+            return UndoableOperation.Reset;
+        if (lower.Contains("branch"))
+            return UndoableOperation.Branch;
+        if (lower.Contains("checkout") || lower.Contains("switch"))
+            return UndoableOperation.Checkout;
+        if (lower.Contains("rebase"))
+            return UndoableOperation.Rebase;
+        if (lower.Contains("tag"))
+            return UndoableOperation.Tag;
+        if (lower.Contains("stash"))
+            return UndoableOperation.Stash;
+
+        return UndoableOperation.Unknown;
+    }
+
+    /// <summary>
+    /// Get A Human-Readable Summary Of What An Undo Would Do
+    /// </summary>
+    public string GetUndoPreview(int stepsBack = 1)
+    {
+        try
+        {
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+                return "Not On Any Branch";
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            if (reflog.Count == 0)
+                return "No Operations To Undo";
+
+            if (stepsBack >= reflog.Count)
+                return $"Cannot Undo {stepsBack} Steps (Only {reflog.Count} In History)";
+
+            var targetEntry = reflog[stepsBack];
+            var operations = new List<string>();
+
+            for (int i = 0; i < stepsBack; i++)
+            {
+                operations.Add(reflog[i].Message);
+            }
+
+            return $"Would Undo {stepsBack} Operation(s) And Restore To {targetEntry.NewValue[..8]}:\n" +
+                   string.Join("\n", operations.Select((op, i) => $"  {i + 1}. {op}"));
+        }
+        catch
+        {
+            return "Cannot Generate Preview";
+        }
+    }
+
+    /// <summary>
+    /// Check If There Are Operations That Can Be Undone
+    /// </summary>
+    public bool CanUndo()
+    {
+        try
+        {
+            string currentBranch = _repoManager.GetCurrentBranch();
+            if (string.IsNullOrEmpty(currentBranch))
+                return false;
+
+            var reflog = _reflogManager.GetReflog($"refs/heads/{currentBranch}");
+            return reflog.Count > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+} // namespace Synrix.Core

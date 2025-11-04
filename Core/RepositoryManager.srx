@@ -1,0 +1,485 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// REPOSITORYMANAGER.SRX - REPOSITORY INITIALIZATION AND CONFIGURATION
+// HANDLES REPOSITORY CREATION, CONFIGURATION, AND STATUS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+
+namespace Synrix.Core
+{
+    // REPOSITORY CONFIGURATION
+    public class RepositoryConfig
+    {
+        public string UserName { get; set; }
+        public string UserEmail { get; set; }
+        public string DefaultBranch { get; set; }
+        public bool CoreCompression { get; set; }
+        public int CoreCompressionLevel { get; set; }
+        public Dictionary<string, string> CustomSettings { get; set; }
+
+        public RepositoryConfig()
+        {
+            DefaultBranch = "main";
+            CoreCompression = true;
+            CoreCompressionLevel = 6;
+            CustomSettings = new Dictionary<string, string>();
+        }
+    }
+
+    // REPOSITORY STATUS INFORMATION
+    public class RepositoryStatus
+    {
+        public string CurrentBranch { get; set; }
+        public string CurrentCommit { get; set; }
+        public List<string> StagedFiles { get; set; }
+        public List<string> ModifiedFiles { get; set; }
+        public List<string> UntrackedFiles { get; set; }
+        public List<string> DeletedFiles { get; set; }
+
+        public RepositoryStatus()
+        {
+            StagedFiles = new List<string>();
+            ModifiedFiles = new List<string>();
+            UntrackedFiles = new List<string>();
+            DeletedFiles = new List<string>();
+        }
+    }
+
+    // MAIN REPOSITORY MANAGER
+    public class RepositoryManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string SynrixPath;
+        private readonly string ConfigPath;
+        private readonly string HeadPath;
+        private readonly string RefsPath;
+        private readonly string LogsPath;
+
+        public RepositoryManager(string Path)
+        {
+            RepositoryPath = Path;
+            SynrixPath = System.IO.Path.Combine(RepositoryPath, ".synrix");
+            ConfigPath = System.IO.Path.Combine(SynrixPath, "config");
+            HeadPath = System.IO.Path.Combine(SynrixPath, "HEAD");
+            RefsPath = System.IO.Path.Combine(SynrixPath, "refs");
+            LogsPath = System.IO.Path.Combine(SynrixPath, "logs");
+        }
+
+        // INITIALIZE A NEW SYNRIX REPOSITORY
+        public void InitializeRepository(string InitialBranch = "main")
+        {
+            if (Directory.Exists(SynrixPath))
+            {
+                throw new InvalidOperationException("REPOSITORY ALREADY INITIALIZED");
+            }
+
+            Console.WriteLine($"INITIALIZING SYNRIX REPOSITORY IN {RepositoryPath}");
+
+            // CREATE DIRECTORY STRUCTURE
+            Directory.CreateDirectory(SynrixPath);
+            Directory.CreateDirectory(System.IO.Path.Combine(SynrixPath, "objects"));
+            Directory.CreateDirectory(System.IO.Path.Combine(SynrixPath, "refs", "heads"));
+            Directory.CreateDirectory(System.IO.Path.Combine(SynrixPath, "refs", "tags"));
+            Directory.CreateDirectory(System.IO.Path.Combine(SynrixPath, "logs"));
+            Directory.CreateDirectory(System.IO.Path.Combine(SynrixPath, "hooks"));
+
+            // CREATE DEFAULT CONFIG
+            var Config = new RepositoryConfig
+            {
+                DefaultBranch = InitialBranch
+            };
+            SaveConfig(Config);
+
+            // CREATE HEAD FILE POINTING TO INITIAL BRANCH
+            var HeadContent = $"ref: refs/heads/{InitialBranch}";
+            File.WriteAllText(HeadPath, HeadContent);
+
+            // CREATE IGNORE FILE
+            var IgnorePath = System.IO.Path.Combine(RepositoryPath, ".synrixignore");
+            if (!File.Exists(IgnorePath))
+            {
+                var DefaultIgnore = @"# SYNRIX IGNORE FILE
+.synrix/
+*.tmp
+*.log
+*.swp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+";
+                File.WriteAllText(IgnorePath, DefaultIgnore);
+            }
+
+            // CREATE INFO FILE
+            var InfoPath = System.IO.Path.Combine(SynrixPath, "info");
+            Directory.CreateDirectory(InfoPath);
+            File.WriteAllText(
+                System.IO.Path.Combine(InfoPath, "description"),
+                "SYNRIX REPOSITORY - SYNCHRONIZED REPOSITORY INDEXING EXTENSION"
+            );
+
+            Console.WriteLine($"INITIALIZED EMPTY SYNRIX REPOSITORY IN {SynrixPath}");
+        }
+
+        // CHECK IF CURRENT DIRECTORY IS A SYNRIX REPOSITORY
+        public bool IsRepository()
+        {
+            return Directory.Exists(SynrixPath) && File.Exists(HeadPath);
+        }
+
+        // FIND REPOSITORY ROOT FROM CURRENT DIRECTORY
+        public static string FindRepositoryRoot(string StartPath)
+        {
+            var CurrentPath = StartPath;
+            
+            while (!string.IsNullOrEmpty(CurrentPath))
+            {
+                var SynrixDir = System.IO.Path.Combine(CurrentPath, ".synrix");
+                if (Directory.Exists(SynrixDir))
+                {
+                    return CurrentPath;
+                }
+
+                var Parent = Directory.GetParent(CurrentPath);
+                CurrentPath = Parent?.FullName;
+            }
+
+            return null;
+        }
+
+        // SAVE REPOSITORY CONFIGURATION
+        public void SaveConfig(RepositoryConfig Config)
+        {
+            var JsonOptions = new JsonSerializerOptions { WriteIndented = true };
+            var JsonContent = JsonSerializer.Serialize(Config, JsonOptions);
+            File.WriteAllText(ConfigPath, JsonContent);
+        }
+
+        // LOAD REPOSITORY CONFIGURATION
+        public RepositoryConfig LoadConfig()
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return new RepositoryConfig();
+            }
+
+            var JsonContent = File.ReadAllText(ConfigPath);
+            return JsonSerializer.Deserialize<RepositoryConfig>(JsonContent);
+        }
+
+        // SET CONFIGURATION VALUE
+        public void SetConfigValue(string Key, string Value)
+        {
+            var Config = LoadConfig();
+
+            switch (Key.ToLower())
+            {
+                case "user.name":
+                    Config.UserName = Value;
+                    break;
+                case "user.email":
+                    Config.UserEmail = Value;
+                    break;
+                case "core.defaultbranch":
+                    Config.DefaultBranch = Value;
+                    break;
+                case "core.compression":
+                    Config.CoreCompression = bool.Parse(Value);
+                    break;
+                default:
+                    Config.CustomSettings[Key] = Value;
+                    break;
+            }
+
+            SaveConfig(Config);
+        }
+
+        // GET CONFIGURATION VALUE
+        public string GetConfigValue(string Key)
+        {
+            var Config = LoadConfig();
+
+            switch (Key.ToLower())
+            {
+                case "user.name":
+                    return Config.UserName;
+                case "user.email":
+                    return Config.UserEmail;
+                case "core.defaultbranch":
+                    return Config.DefaultBranch;
+                case "core.compression":
+                    return Config.CoreCompression.ToString();
+                default:
+                    return Config.CustomSettings.ContainsKey(Key) ? Config.CustomSettings[Key] : null;
+            }
+        }
+
+        // GET CURRENT BRANCH NAME
+        public string GetCurrentBranch()
+        {
+            if (!File.Exists(HeadPath))
+            {
+                return null;
+            }
+
+            var HeadContent = File.ReadAllText(HeadPath).Trim();
+            
+            if (HeadContent.StartsWith("ref: "))
+            {
+                var RefPath = HeadContent.Substring(5);
+                if (RefPath.StartsWith("refs/heads/"))
+                {
+                    return RefPath.Substring(11);
+                }
+            }
+
+            return "DETACHED HEAD";
+        }
+
+        // GET CURRENT COMMIT HASH
+        public string GetCurrentCommit()
+        {
+            var CurrentBranch = GetCurrentBranch();
+            
+            if (CurrentBranch == "DETACHED HEAD")
+            {
+                var HeadContent = File.ReadAllText(HeadPath).Trim();
+                return HeadContent.StartsWith("ref: ") ? null : HeadContent;
+            }
+
+            var BranchPath = System.IO.Path.Combine(RefsPath, "heads", CurrentBranch);
+            
+            if (!File.Exists(BranchPath))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(BranchPath).Trim();
+        }
+
+        // UPDATE HEAD TO POINT TO A COMMIT OR BRANCH
+        public void UpdateHead(string Target, bool IsRef = false)
+        {
+            if (IsRef)
+            {
+                File.WriteAllText(HeadPath, $"ref: {Target}");
+            }
+            else
+            {
+                File.WriteAllText(HeadPath, Target);
+            }
+        }
+
+        // GET REPOSITORY STATUS
+        public RepositoryStatus GetStatus()
+        {
+            var Status = new RepositoryStatus
+            {
+                CurrentBranch = GetCurrentBranch(),
+                CurrentCommit = GetCurrentCommit()
+            };
+
+            // GET STAGED FILES FROM INDEX
+            var StagingArea = new StagingArea(RepositoryPath);
+            var IndexEntries = StagingArea.GetAllEntries();
+            Status.StagedFiles = IndexEntries.Keys.ToList();
+
+            // GET WORKING DIRECTORY FILES
+            var WorkingFiles = GetWorkingDirectoryFiles();
+            var TrackedFiles = new HashSet<string>(IndexEntries.Keys);
+
+            foreach (var File in WorkingFiles)
+            {
+                if (!TrackedFiles.Contains(File))
+                {
+                    Status.UntrackedFiles.Add(File);
+                }
+                else
+                {
+                    // CHECK IF MODIFIED
+                    var CurrentHash = ComputeFileHash(System.IO.Path.Combine(RepositoryPath, File));
+                    if (CurrentHash != IndexEntries[File])
+                    {
+                        Status.ModifiedFiles.Add(File);
+                    }
+                }
+            }
+
+            // CHECK FOR DELETED FILES
+            foreach (var TrackedFile in TrackedFiles)
+            {
+                var FilePath = System.IO.Path.Combine(RepositoryPath, TrackedFile);
+                if (!File.Exists(FilePath))
+                {
+                    Status.DeletedFiles.Add(TrackedFile);
+                }
+            }
+
+            return Status;
+        }
+
+        // GET ALL FILES IN WORKING DIRECTORY
+        private List<string> GetWorkingDirectoryFiles()
+        {
+            var Files = new List<string>();
+            var IgnorePatterns = LoadIgnorePatterns();
+
+            GetFilesRecursive(RepositoryPath, RepositoryPath, Files, IgnorePatterns);
+
+            return Files;
+        }
+
+        // RECURSIVE FILE LISTING
+        private void GetFilesRecursive(string RootPath, string CurrentPath, List<string> Files, List<string> IgnorePatterns)
+        {
+            try
+            {
+                foreach (var File in Directory.GetFiles(CurrentPath))
+                {
+                    var RelativePath = GetRelativePath(RootPath, File);
+                    
+                    if (!ShouldIgnore(RelativePath, IgnorePatterns))
+                    {
+                        Files.Add(RelativePath);
+                    }
+                }
+
+                foreach (var Dir in Directory.GetDirectories(CurrentPath))
+                {
+                    var DirName = System.IO.Path.GetFileName(Dir);
+                    var RelativePath = GetRelativePath(RootPath, Dir);
+
+                    if (DirName != ".synrix" && !ShouldIgnore(RelativePath, IgnorePatterns))
+                    {
+                        GetFilesRecursive(RootPath, Dir, Files, IgnorePatterns);
+                    }
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // SKIP DIRECTORIES WITHOUT ACCESS
+            }
+        }
+
+        // GET RELATIVE PATH
+        private string GetRelativePath(string RootPath, string FullPath)
+        {
+            var RootUri = new Uri(RootPath.TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar);
+            var FullUri = new Uri(FullPath);
+            return Uri.UnescapeDataString(RootUri.MakeRelativeUri(FullUri).ToString().Replace('/', System.IO.Path.DirectorySeparatorChar));
+        }
+
+        // LOAD IGNORE PATTERNS
+        private List<string> LoadIgnorePatterns()
+        {
+            var Patterns = new List<string> { ".synrix/" };
+            var IgnorePath = System.IO.Path.Combine(RepositoryPath, ".synrixignore");
+
+            if (File.Exists(IgnorePath))
+            {
+                var Lines = File.ReadAllLines(IgnorePath);
+                foreach (var Line in Lines)
+                {
+                    var Trimmed = Line.Trim();
+                    if (!string.IsNullOrEmpty(Trimmed) && !Trimmed.StartsWith("#"))
+                    {
+                        Patterns.Add(Trimmed);
+                    }
+                }
+            }
+
+            return Patterns;
+        }
+
+        // CHECK IF FILE SHOULD BE IGNORED
+        private bool ShouldIgnore(string Path, List<string> Patterns)
+        {
+            foreach (var Pattern in Patterns)
+            {
+                if (MatchPattern(Path, Pattern))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // SIMPLE PATTERN MATCHING
+        private bool MatchPattern(string Path, string Pattern)
+        {
+            Path = Path.Replace(System.IO.Path.DirectorySeparatorChar, '/');
+            Pattern = Pattern.Replace(System.IO.Path.DirectorySeparatorChar, '/');
+
+            if (Pattern.EndsWith("/"))
+            {
+                return Path.StartsWith(Pattern.TrimEnd('/'));
+            }
+
+            if (Pattern.Contains("*"))
+            {
+                var Regex = new System.Text.RegularExpressions.Regex(
+                    "^" + System.Text.RegularExpressions.Regex.Escape(Pattern).Replace("\\*", ".*") + "$"
+                );
+                return Regex.IsMatch(Path);
+            }
+
+            return Path == Pattern || Path.StartsWith(Pattern + "/");
+        }
+
+        // COMPUTE FILE HASH
+        private string ComputeFileHash(string FilePath)
+        {
+            using (var Sha256 = System.Security.Cryptography.SHA256.Create())
+            {
+                using (var Stream = File.OpenRead(FilePath))
+                {
+                    var HashBytes = Sha256.ComputeHash(Stream);
+                    return BitConverter.ToString(HashBytes).Replace("-", "").ToLower();
+                }
+            }
+        }
+
+        // GET REPOSITORY PATH
+        public string GetRepositoryPath()
+        {
+            return RepositoryPath;
+        }
+
+        // GET SYNRIX DIRECTORY PATH
+        public string GetSynrixPath()
+        {
+            return SynrixPath;
+        }
+
+        // GET BRANCH COMMIT HASH
+        public string? GetBranchCommit(string branchName)
+        {
+            var branchPath = System.IO.Path.Combine(RefsPath, "heads", branchName);
+            
+            if (!File.Exists(branchPath))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(branchPath).Trim();
+        }
+
+        // UPDATE BRANCH TO POINT TO A COMMIT
+        public void UpdateBranchCommit(string branchName, string commitHash)
+        {
+            var branchPath = System.IO.Path.Combine(RefsPath, "heads", branchName);
+            var branchDir = System.IO.Path.GetDirectoryName(branchPath);
+            
+            if (!string.IsNullOrEmpty(branchDir) && !Directory.Exists(branchDir))
+            {
+                Directory.CreateDirectory(branchDir);
+            }
+
+            File.WriteAllText(branchPath, commitHash);
+        }
+    }
+}

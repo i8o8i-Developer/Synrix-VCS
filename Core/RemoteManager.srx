@@ -1,0 +1,687 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// REMOTEMANAGER.SRX - REMOTE REPOSITORY OPERATIONS
+// HANDLES REMOTE ADD/REMOVE, PUSH/PULL, FETCH, CLONE
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Synrix.Core
+{
+    // REMOTE REPOSITORY INFORMATION
+    public class RemoteInfo
+    {
+        public string Name { get; set; }
+        public string Url { get; set; }
+        public string FetchUrl { get; set; }
+        public string PushUrl { get; set; }
+        public RemoteType Type { get; set; }
+    }
+
+    // REMOTE TYPE
+    public enum RemoteType
+    {
+        Local,
+        HTTP,
+        HTTPS,
+        SSH,
+        Git
+    }
+
+    // PUSH RESULT
+    public class PushResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public List<string> PushedRefs { get; set; }
+
+        public PushResult()
+        {
+            PushedRefs = new List<string>();
+        }
+    }
+
+    // FETCH RESULT
+    public class FetchResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public List<string> FetchedRefs { get; set; }
+        public Dictionary<string, string> UpdatedRefs { get; set; }
+
+        public FetchResult()
+        {
+            FetchedRefs = new List<string>();
+            UpdatedRefs = new Dictionary<string, string>();
+        }
+    }
+
+    // REMOTE MANAGER
+    public class RemoteManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string RemotesPath;
+        private readonly string ConfigPath;
+        private readonly ObjectStorage Storage;
+        private readonly BranchManager BranchMgr;
+        private readonly CommitManager CommitMgr;
+
+        public RemoteManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            RemotesPath = Path.Combine(RepositoryPath, ".synrix", "remotes");
+            ConfigPath = Path.Combine(RepositoryPath, ".synrix", "config");
+            Storage = new ObjectStorage(RepositoryPath);
+            BranchMgr = new BranchManager(RepositoryPath);
+            CommitMgr = new CommitManager(RepositoryPath);
+            InitializeRemotes();
+        }
+
+        // INITIALIZE REMOTES DIRECTORY
+        private void InitializeRemotes()
+        {
+            Directory.CreateDirectory(RemotesPath);
+        }
+
+        // ADD REMOTE
+        public void AddRemote(string Name, string Url, bool Mirror = false)
+        {
+            if (string.IsNullOrWhiteSpace(Name))
+            {
+                throw new ArgumentException("REMOTE NAME CANNOT BE EMPTY");
+            }
+
+            if (string.IsNullOrWhiteSpace(Url))
+            {
+                throw new ArgumentException("REMOTE URL CANNOT BE EMPTY");
+            }
+
+            if (RemoteExists(Name))
+            {
+                throw new InvalidOperationException($"REMOTE '{Name}' ALREADY EXISTS");
+            }
+
+            // CREATE REMOTE CONFIG
+            var RemotePath = Path.Combine(RemotesPath, Name);
+            Directory.CreateDirectory(RemotePath);
+
+            var ConfigFile = Path.Combine(RemotePath, "config");
+            var ConfigContent = new StringBuilder();
+            ConfigContent.AppendLine($"url={Url}");
+            ConfigContent.AppendLine($"fetch=+refs/heads/*:refs/remotes/{Name}/*");
+            if (Mirror)
+            {
+                ConfigContent.AppendLine("mirror=true");
+            }
+
+            File.WriteAllText(ConfigFile, ConfigContent.ToString());
+
+            Console.WriteLine($"ADDED REMOTE: {Name} -> {Url}");
+        }
+
+        // REMOVE REMOTE
+        public void RemoveRemote(string Name)
+        {
+            if (!RemoteExists(Name))
+            {
+                throw new InvalidOperationException($"REMOTE '{Name}' NOT FOUND");
+            }
+
+            var RemotePath = Path.Combine(RemotesPath, Name);
+            Directory.Delete(RemotePath, true);
+
+            // REMOVE REMOTE REFS
+            var RemoteRefsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", Name);
+            if (Directory.Exists(RemoteRefsPath))
+            {
+                Directory.Delete(RemoteRefsPath, true);
+            }
+
+            Console.WriteLine($"REMOVED REMOTE: {Name}");
+        }
+
+        // RENAME REMOTE
+        public void RenameRemote(string OldName, string NewName)
+        {
+            if (!RemoteExists(OldName))
+            {
+                throw new InvalidOperationException($"REMOTE '{OldName}' NOT FOUND");
+            }
+
+            if (RemoteExists(NewName))
+            {
+                throw new InvalidOperationException($"REMOTE '{NewName}' ALREADY EXISTS");
+            }
+
+            var OldPath = Path.Combine(RemotesPath, OldName);
+            var NewPath = Path.Combine(RemotesPath, NewName);
+            Directory.Move(OldPath, NewPath);
+
+            // UPDATE REFS
+            var OldRefsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", OldName);
+            var NewRefsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", NewName);
+            if (Directory.Exists(OldRefsPath))
+            {
+                Directory.Move(OldRefsPath, NewRefsPath);
+            }
+
+            Console.WriteLine($"RENAMED REMOTE: {OldName} -> {NewName}");
+        }
+
+        // LIST REMOTES
+        public List<RemoteInfo> ListRemotes(bool Verbose = false)
+        {
+            var Remotes = new List<RemoteInfo>();
+
+            if (!Directory.Exists(RemotesPath))
+            {
+                return Remotes;
+            }
+
+            foreach (var RemoteDir in Directory.GetDirectories(RemotesPath))
+            {
+                var Name = Path.GetFileName(RemoteDir);
+                var ConfigFile = Path.Combine(RemoteDir, "config");
+
+                if (File.Exists(ConfigFile))
+                {
+                    var Config = File.ReadAllLines(ConfigFile);
+                    var Remote = new RemoteInfo { Name = Name };
+
+                    foreach (var Line in Config)
+                    {
+                        if (Line.StartsWith("url="))
+                        {
+                            Remote.Url = Line.Substring(4);
+                            Remote.FetchUrl = Remote.Url;
+                            Remote.PushUrl = Remote.Url;
+                            Remote.Type = DetermineRemoteType(Remote.Url);
+                        }
+                    }
+
+                    Remotes.Add(Remote);
+
+                    if (Verbose)
+                    {
+                        Console.WriteLine($"{Name}\t{Remote.Url} (fetch)");
+                        Console.WriteLine($"{Name}\t{Remote.Url} (push)");
+                    }
+                    else
+                    {
+                        Console.WriteLine(Name);
+                    }
+                }
+            }
+
+            return Remotes;
+        }
+
+        // SHOW REMOTE DETAILS
+        public void ShowRemote(string Name)
+        {
+            if (!RemoteExists(Name))
+            {
+                throw new InvalidOperationException($"REMOTE '{Name}' NOT FOUND");
+            }
+
+            var RemotePath = Path.Combine(RemotesPath, Name);
+            var ConfigFile = Path.Combine(RemotePath, "config");
+            var Config = File.ReadAllLines(ConfigFile);
+
+            Console.WriteLine($"* REMOTE {Name}");
+            Console.WriteLine($"  FETCH URL: {GetRemoteUrl(Name)}");
+            Console.WriteLine($"  PUSH URL: {GetRemoteUrl(Name)}");
+            Console.WriteLine();
+
+            // SHOW REMOTE BRANCHES
+            var RemoteRefsPath = Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", Name);
+            if (Directory.Exists(RemoteRefsPath))
+            {
+                Console.WriteLine("  REMOTE BRANCHES:");
+                foreach (var BranchFile in Directory.GetFiles(RemoteRefsPath))
+                {
+                    var BranchName = Path.GetFileName(BranchFile);
+                    var CommitHash = File.ReadAllText(BranchFile).Trim();
+                    Console.WriteLine($"    {Name}/{BranchName} -> {CommitHash.Substring(0, 7)}");
+                }
+            }
+        }
+
+        // PUSH TO REMOTE
+        public async Task<PushResult> PushAsync(string RemoteName, string BranchName, bool Force = false, bool Tags = false)
+        {
+            var Result = new PushResult();
+
+            if (!RemoteExists(RemoteName))
+            {
+                Result.Success = false;
+                Result.Message = $"REMOTE '{RemoteName}' NOT FOUND";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+
+            var RemoteUrl = GetRemoteUrl(RemoteName);
+            var RemoteType = DetermineRemoteType(RemoteUrl);
+
+            Console.WriteLine($"PUSHING TO {RemoteName} ({RemoteUrl})...");
+
+            switch (RemoteType)
+            {
+                case RemoteType.Local:
+                    return PushToLocalRemote(RemoteUrl, BranchName, Force);
+
+                case RemoteType.HTTP:
+                case RemoteType.HTTPS:
+                    return await PushToHttpRemoteAsync(RemoteUrl, BranchName, Force);
+
+                case RemoteType.SSH:
+                    Result.Success = false;
+                    Result.Message = "SSH PROTOCOL NOT YET IMPLEMENTED";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+
+                default:
+                    Result.Success = false;
+                    Result.Message = "UNKNOWN REMOTE TYPE";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+            }
+        }
+
+        // PUSH TO LOCAL REMOTE
+        private PushResult PushToLocalRemote(string RemotePath, string BranchName, bool Force)
+        {
+            var Result = new PushResult();
+
+            try
+            {
+                if (!Directory.Exists(RemotePath))
+                {
+                    Result.Success = false;
+                    Result.Message = $"REMOTE PATH NOT FOUND: {RemotePath}";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+                }
+
+                // GET LOCAL BRANCH COMMIT
+                var LocalCommit = BranchMgr.GetBranchCommit(BranchName);
+                if (string.IsNullOrEmpty(LocalCommit))
+                {
+                    Result.Success = false;
+                    Result.Message = $"BRANCH '{BranchName}' NOT FOUND";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+                }
+
+                // COPY OBJECTS TO REMOTE
+                var RemoteStorage = new ObjectStorage(RemotePath);
+                CopyCommitAndObjects(LocalCommit, RemoteStorage);
+
+                // UPDATE REMOTE BRANCH
+                var RemoteBranchPath = Path.Combine(RemotePath, ".synrix", "refs", "heads", BranchName);
+                Directory.CreateDirectory(Path.GetDirectoryName(RemoteBranchPath));
+                File.WriteAllText(RemoteBranchPath, LocalCommit);
+
+                Result.Success = true;
+                Result.Message = $"PUSHED {BranchName} -> {LocalCommit.Substring(0, 7)}";
+                Result.PushedRefs.Add($"{BranchName}:{LocalCommit}");
+                Console.WriteLine(Result.Message);
+
+                return Result;
+            }
+            catch (Exception Ex)
+            {
+                Result.Success = false;
+                Result.Message = $"PUSH FAILED: {Ex.Message}";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+        }
+
+        // PUSH TO HTTP REMOTE
+        private async Task<PushResult> PushToHttpRemoteAsync(string RemoteUrl, string BranchName, bool Force)
+        {
+            var Result = new PushResult();
+
+            // TODO: Implement HTTP push protocol
+            Result.Success = false;
+            Result.Message = "HTTP PUSH NOT YET FULLY IMPLEMENTED";
+            Console.WriteLine(Result.Message);
+
+            return await Task.FromResult(Result);
+        }
+
+        // FETCH FROM REMOTE
+        public async Task<FetchResult> FetchAsync(string RemoteName, string BranchName = null)
+        {
+            var Result = new FetchResult();
+
+            if (!RemoteExists(RemoteName))
+            {
+                Result.Success = false;
+                Result.Message = $"REMOTE '{RemoteName}' NOT FOUND";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+
+            var RemoteUrl = GetRemoteUrl(RemoteName);
+            var RemoteType = DetermineRemoteType(RemoteUrl);
+
+            Console.WriteLine($"FETCHING FROM {RemoteName} ({RemoteUrl})...");
+
+            switch (RemoteType)
+            {
+                case RemoteType.Local:
+                    return FetchFromLocalRemote(RemoteName, RemoteUrl, BranchName);
+
+                case RemoteType.HTTP:
+                case RemoteType.HTTPS:
+                    return await FetchFromHttpRemoteAsync(RemoteName, RemoteUrl, BranchName);
+
+                default:
+                    Result.Success = false;
+                    Result.Message = "UNSUPPORTED REMOTE TYPE";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+            }
+        }
+
+        // FETCH FROM LOCAL REMOTE
+        private FetchResult FetchFromLocalRemote(string RemoteName, string RemotePath, string BranchName)
+        {
+            var Result = new FetchResult();
+
+            try
+            {
+                if (!Directory.Exists(RemotePath))
+                {
+                    Result.Success = false;
+                    Result.Message = $"REMOTE PATH NOT FOUND: {RemotePath}";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+                }
+
+                var RemoteStorage = new ObjectStorage(RemotePath);
+                var RemoteRefsPath = Path.Combine(RemotePath, ".synrix", "refs", "heads");
+
+                if (!Directory.Exists(RemoteRefsPath))
+                {
+                    Result.Success = false;
+                    Result.Message = "NO REMOTE BRANCHES FOUND";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+                }
+
+                // FETCH ALL BRANCHES OR SPECIFIC BRANCH
+                var BranchFiles = Directory.GetFiles(RemoteRefsPath);
+                foreach (var BranchFile in BranchFiles)
+                {
+                    var Branch = Path.GetFileName(BranchFile);
+
+                    if (BranchName != null && Branch != BranchName)
+                    {
+                        continue;
+                    }
+
+                    var RemoteCommit = File.ReadAllText(BranchFile).Trim();
+
+                    // COPY OBJECTS
+                    CopyCommitAndObjects(RemoteCommit, Storage, RemoteStorage);
+
+                    // UPDATE REMOTE TRACKING BRANCH
+                    var LocalRemoteRef = Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", RemoteName, Branch);
+                    Directory.CreateDirectory(Path.GetDirectoryName(LocalRemoteRef));
+                    File.WriteAllText(LocalRemoteRef, RemoteCommit);
+
+                    Result.FetchedRefs.Add($"{RemoteName}/{Branch}");
+                    Result.UpdatedRefs[$"{RemoteName}/{Branch}"] = RemoteCommit;
+                    Console.WriteLine($"  {Branch} -> {RemoteCommit.Substring(0, 7)}");
+                }
+
+                Result.Success = true;
+                Result.Message = $"FETCHED {Result.FetchedRefs.Count} BRANCH(ES)";
+                Console.WriteLine(Result.Message);
+
+                return Result;
+            }
+            catch (Exception Ex)
+            {
+                Result.Success = false;
+                Result.Message = $"FETCH FAILED: {Ex.Message}";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+        }
+
+        // FETCH FROM HTTP REMOTE
+        private async Task<FetchResult> FetchFromHttpRemoteAsync(string RemoteName, string RemoteUrl, string BranchName)
+        {
+            var Result = new FetchResult();
+
+            // TODO: Implement HTTP fetch protocol
+            Result.Success = false;
+            Result.Message = "HTTP FETCH NOT YET FULLY IMPLEMENTED";
+            Console.WriteLine(Result.Message);
+
+            return await Task.FromResult(Result);
+        }
+
+        // PULL FROM REMOTE (FETCH + MERGE)
+        public async Task<bool> PullAsync(string RemoteName, string BranchName)
+        {
+            // FETCH FROM REMOTE
+            var FetchResult = await FetchAsync(RemoteName, BranchName);
+
+            if (!FetchResult.Success)
+            {
+                return false;
+            }
+
+            // MERGE REMOTE BRANCH
+            var MergeMgr = new MergeManager(RepositoryPath);
+            var RemoteBranch = $"{RemoteName}/{BranchName}";
+
+            try
+            {
+                var MergeResult = MergeMgr.MergeBranch(RemoteBranch, false);
+                return MergeResult.Success;
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"MERGE FAILED: {Ex.Message}");
+                return false;
+            }
+        }
+
+        // CLONE REPOSITORY
+        public static async Task<bool> CloneAsync(string RemoteUrl, string TargetPath, string Branch = "main")
+        {
+            try
+            {
+                Console.WriteLine($"CLONING {RemoteUrl} INTO {TargetPath}...");
+
+                // CREATE TARGET DIRECTORY
+                Directory.CreateDirectory(TargetPath);
+
+                // INITIALIZE REPOSITORY
+                var RepoMgr = new RepositoryManager(TargetPath);
+                RepoMgr.InitializeRepository();
+
+                // ADD REMOTE
+                var RemoteMgr = new RemoteManager(TargetPath);
+                RemoteMgr.AddRemote("origin", RemoteUrl);
+
+                // FETCH FROM REMOTE
+                var FetchResult = await RemoteMgr.FetchAsync("origin", Branch);
+
+                if (!FetchResult.Success)
+                {
+                    Console.WriteLine("CLONE FAILED");
+                    return false;
+                }
+
+                // CHECKOUT BRANCH
+                var BranchMgr = new BranchManager(TargetPath);
+                var RemoteCommit = FetchResult.UpdatedRefs[$"origin/{Branch}"];
+
+                // CREATE LOCAL BRANCH
+                BranchMgr.CreateBranch(Branch, RemoteCommit);
+                BranchMgr.SwitchBranch(Branch);
+
+                Console.WriteLine($"CLONED SUCCESSFULLY INTO {TargetPath}");
+                return true;
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"CLONE FAILED: {Ex.Message}");
+                return false;
+            }
+        }
+
+        // HELPER METHODS
+
+        private bool RemoteExists(string Name)
+        {
+            var RemotePath = Path.Combine(RemotesPath, Name);
+            return Directory.Exists(RemotePath);
+        }
+
+        private string GetRemoteUrl(string Name)
+        {
+            var ConfigFile = Path.Combine(RemotesPath, Name, "config");
+            if (!File.Exists(ConfigFile))
+            {
+                return null;
+            }
+
+            foreach (var Line in File.ReadAllLines(ConfigFile))
+            {
+                if (Line.StartsWith("url="))
+                {
+                    return Line.Substring(4);
+                }
+            }
+
+            return null;
+        }
+
+        private RemoteType DetermineRemoteType(string Url)
+        {
+            if (string.IsNullOrEmpty(Url))
+            {
+                return RemoteType.Local;
+            }
+
+            if (Url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.HTTP;
+            }
+
+            if (Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.HTTPS;
+            }
+
+            if (Url.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) ||
+                Url.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.SSH;
+            }
+
+            if (Url.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.Git;
+            }
+
+            // ASSUME LOCAL PATH
+            return RemoteType.Local;
+        }
+
+        private void CopyCommitAndObjects(string CommitHash, ObjectStorage TargetStorage, ObjectStorage SourceStorage = null)
+        {
+            if (SourceStorage == null)
+            {
+                SourceStorage = Storage;
+            }
+
+            var Visited = new HashSet<string>();
+            var Queue = new Queue<string>();
+            Queue.Enqueue(CommitHash);
+
+            while (Queue.Count > 0)
+            {
+                var CurrentHash = Queue.Dequeue();
+
+                if (Visited.Contains(CurrentHash))
+                {
+                    continue;
+                }
+
+                Visited.Add(CurrentHash);
+
+                try
+                {
+                    // COPY OBJECT IF NOT EXISTS IN TARGET
+                    if (!TargetStorage.ObjectExists(CurrentHash))
+                    {
+                        var Obj = SourceStorage.GetObject(CurrentHash);
+                        TargetStorage.StoreObject(Obj);
+                    }
+
+                    // IF COMMIT, PROCESS TREE AND PARENTS
+                    var Commit = SourceStorage.GetCommit(CurrentHash);
+
+                    // QUEUE TREE
+                    if (!string.IsNullOrEmpty(Commit.TreeHash))
+                    {
+                        Queue.Enqueue(Commit.TreeHash);
+                        CopyTree(Commit.TreeHash, TargetStorage, SourceStorage);
+                    }
+
+                    // QUEUE PARENTS
+                    foreach (var Parent in Commit.ParentHashes)
+                    {
+                        Queue.Enqueue(Parent);
+                    }
+                }
+                catch
+                {
+                    // SKIP IF OBJECT NOT FOUND
+                }
+            }
+        }
+
+        private void CopyTree(string TreeHash, ObjectStorage TargetStorage, ObjectStorage SourceStorage)
+        {
+            if (TargetStorage.ObjectExists(TreeHash))
+            {
+                return;
+            }
+
+            var TreeObj = SourceStorage.GetObject(TreeHash);
+            TargetStorage.StoreObject(TreeObj);
+
+            var Tree = SourceStorage.GetTree(TreeHash);
+
+            foreach (var Entry in Tree)
+            {
+                if (!TargetStorage.ObjectExists(Entry.Hash))
+                {
+                    if (Entry.Type == "tree")
+                    {
+                        CopyTree(Entry.Hash, TargetStorage, SourceStorage);
+                    }
+                    else
+                    {
+                        var BlobObj = SourceStorage.GetObject(Entry.Hash);
+                        TargetStorage.StoreObject(BlobObj);
+                    }
+                }
+            }
+        }
+    }
+}

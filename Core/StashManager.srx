@@ -1,0 +1,419 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// STASHMANAGER.SRX - STASH MANAGEMENT
+// SAVE AND RESTORE WORKING DIRECTORY CHANGES
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Core
+{
+    // STASH ENTRY
+    public class StashEntry
+    {
+        public int Index { get; set; }
+        public string CommitHash { get; set; }
+        public string Branch { get; set; }
+        public string Message { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+
+    // STASH MANAGER
+    public class StashManager
+    {
+        private readonly string RepositoryPath;
+        private readonly string StashPath;
+        private readonly ObjectStorage Storage;
+        private readonly RepositoryManager RepoMgr;
+        private readonly StagingArea Staging;
+        private readonly CommitManager CommitMgr;
+
+        public StashManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            StashPath = Path.Combine(RepositoryPath, ".synrix", "refs", "stash");
+            Storage = new ObjectStorage(RepositoryPath);
+            RepoMgr = new RepositoryManager(RepositoryPath);
+            Staging = new StagingArea(RepositoryPath);
+            CommitMgr = new CommitManager(RepositoryPath);
+            InitializeStash();
+        }
+
+        // INITIALIZE STASH
+        private void InitializeStash()
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StashPath));
+        }
+
+        // SAVE STASH
+        public string SaveStash(string Message = null, bool IncludeUntracked = false, bool IncludeAll = false)
+        {
+            // CHECK IF THERE ARE CHANGES
+            var Status = RepoMgr.GetStatus();
+            if (Status.ModifiedFiles.Count == 0 && Status.UntrackedFiles.Count == 0)
+            {
+                Console.WriteLine("NO CHANGES TO STASH");
+                return null;
+            }
+
+            var CurrentBranch = RepoMgr.GetCurrentBranch();
+            var CurrentCommit = RepoMgr.GetCurrentCommit();
+
+            // STAGE ALL CHANGES
+            var OriginalStagedFiles = new List<string>(Status.StagedFiles);
+
+            // STAGE MODIFIED FILES
+            foreach (var File in Status.ModifiedFiles)
+            {
+                Staging.StageFile(File);
+            }
+
+            // STAGE UNTRACKED FILES IF REQUESTED
+            if (IncludeUntracked || IncludeAll)
+            {
+                foreach (var File in Status.UntrackedFiles)
+                {
+                    // SKIP IGNORED FILES UNLESS INCLUDE_ALL
+                    if (!IncludeAll && ShouldIgnoreFile(File))
+                    {
+                        continue;
+                    }
+
+                    Staging.StageFile(File);
+                }
+            }
+
+            // CREATE STASH COMMIT
+            var TreeHash = Staging.CreateTree();
+
+            var CommitObj = new CommitObject
+            {
+                TreeHash = TreeHash,
+                ParentHashes = !string.IsNullOrEmpty(CurrentCommit) ? new List<string> { CurrentCommit } : new List<string>(),
+                Author = GetAuthorInfo(),
+                Committer = GetAuthorInfo(),
+                Timestamp = DateTime.Now,
+                Message = Message ?? $"WIP on {CurrentBranch}: {GetCurrentCommitMessage()}"
+            };
+
+            var StashCommitHash = Storage.StoreCommit(CommitObj);
+
+            // SAVE STASH REFERENCE
+            var Stashes = LoadStashes();
+            var NewStash = new StashEntry
+            {
+                Index = Stashes.Count,
+                CommitHash = StashCommitHash,
+                Branch = CurrentBranch,
+                Message = CommitObj.Message,
+                Timestamp = DateTime.Now
+            };
+
+            Stashes.Insert(0, NewStash);
+            SaveStashes(Stashes);
+
+            // RESTORE ORIGINAL STAGING AREA
+            Staging.Clear();
+            foreach (var File in OriginalStagedFiles)
+            {
+                Staging.StageFile(File);
+            }
+
+            // RESET WORKING DIRECTORY
+            RestoreWorkingDirectory(CurrentCommit);
+
+            Console.WriteLine($"SAVED STASH: stash@{{0}} - {NewStash.Message}");
+            return StashCommitHash;
+        }
+
+        // LIST STASHES
+        public List<StashEntry> ListStashes()
+        {
+            return LoadStashes();
+        }
+
+        // SHOW STASH LIST
+        public void ShowStashList()
+        {
+            var Stashes = LoadStashes();
+
+            if (Stashes.Count == 0)
+            {
+                Console.WriteLine("NO STASHES FOUND");
+                return;
+            }
+
+            Console.WriteLine("STASH LIST:");
+            Console.WriteLine();
+
+            foreach (var Stash in Stashes)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write($"stash@{{{Stash.Index}}} ");
+                Console.ResetColor();
+                Console.Write($"WIP on {Stash.Branch}: ");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine(Stash.Message);
+                Console.ResetColor();
+            }
+        }
+
+        // APPLY STASH
+        public bool ApplyStash(int Index = 0)
+        {
+            var Stashes = LoadStashes();
+
+            if (Index < 0 || Index >= Stashes.Count)
+            {
+                Console.WriteLine($"STASH@{{{Index}}} NOT FOUND");
+                return false;
+            }
+
+            var Stash = Stashes[Index];
+
+            try
+            {
+                // GET STASH COMMIT
+                var StashCommit = Storage.GetCommit(Stash.CommitHash);
+                var StashTree = CommitMgr.GetCommitTree(Stash.CommitHash);
+
+                // APPLY CHANGES TO WORKING DIRECTORY
+                foreach (var Entry in StashTree)
+                {
+                    var FilePath = Path.Combine(RepositoryPath, Entry.Name);
+                    var FileContent = Storage.GetBlob(Entry.Hash);
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                    File.WriteAllBytes(FilePath, FileContent);
+
+                    Console.WriteLine($"RESTORED: {Entry.Name}");
+                }
+
+                Console.WriteLine($"APPLIED stash@{{{Index}}}");
+                return true;
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"FAILED TO APPLY STASH: {Ex.Message}");
+                return false;
+            }
+        }
+
+        // POP STASH (APPLY AND DROP)
+        public bool PopStash(int Index = 0)
+        {
+            if (ApplyStash(Index))
+            {
+                DropStash(Index);
+                return true;
+            }
+
+            return false;
+        }
+
+        // DROP STASH
+        public void DropStash(int Index = 0)
+        {
+            var Stashes = LoadStashes();
+
+            if (Index < 0 || Index >= Stashes.Count)
+            {
+                Console.WriteLine($"STASH@{{{Index}}} NOT FOUND");
+                return;
+            }
+
+            var Stash = Stashes[Index];
+            Stashes.RemoveAt(Index);
+
+            // RE-INDEX STASHES
+            for (int I = 0; I < Stashes.Count; I++)
+            {
+                Stashes[I].Index = I;
+            }
+
+            SaveStashes(Stashes);
+            Console.WriteLine($"DROPPED stash@{{{Index}}} - {Stash.Message}");
+        }
+
+        // CLEAR ALL STASHES
+        public void ClearStashes()
+        {
+            SaveStashes(new List<StashEntry>());
+            Console.WriteLine("ALL STASHES CLEARED");
+        }
+
+        // SHOW STASH DIFF
+        public void ShowStash(int Index = 0)
+        {
+            var Stashes = LoadStashes();
+
+            if (Index < 0 || Index >= Stashes.Count)
+            {
+                Console.WriteLine($"STASH@{{{Index}}} NOT FOUND");
+                return;
+            }
+
+            var Stash = Stashes[Index];
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"stash@{{{Index}}} - {Stash.Message}");
+            Console.ResetColor();
+            Console.WriteLine($"BRANCH: {Stash.Branch}");
+            Console.WriteLine($"DATE: {Stash.Timestamp:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine();
+
+            // SHOW FILES IN STASH
+            try
+            {
+                var StashTree = CommitMgr.GetCommitTree(Stash.CommitHash);
+                Console.WriteLine("STASHED FILES:");
+                foreach (var Entry in StashTree)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"  + {Entry.Name}");
+                    Console.ResetColor();
+                }
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"ERROR: {Ex.Message}");
+            }
+        }
+
+        // CREATE BRANCH FROM STASH
+        public void CreateBranchFromStash(string BranchName, int Index = 0)
+        {
+            var Stashes = LoadStashes();
+
+            if (Index < 0 || Index >= Stashes.Count)
+            {
+                Console.WriteLine($"STASH@{{{Index}}} NOT FOUND");
+                return;
+            }
+
+            var Stash = Stashes[Index];
+
+            // CREATE BRANCH AT STASH COMMIT
+            var BranchMgr = new BranchManager(RepositoryPath);
+            BranchMgr.CreateBranch(BranchName, Stash.CommitHash);
+            BranchMgr.SwitchBranch(BranchName);
+
+            // DROP THE STASH
+            DropStash(Index);
+
+            Console.WriteLine($"CREATED BRANCH '{BranchName}' FROM stash@{{{Index}}}");
+        }
+
+        // HELPER METHODS
+
+        private List<StashEntry> LoadStashes()
+        {
+            var Stashes = new List<StashEntry>();
+
+            if (!File.Exists(StashPath))
+            {
+                return Stashes;
+            }
+
+            var Lines = File.ReadAllLines(StashPath);
+            var Index = 0;
+
+            foreach (var Line in Lines)
+            {
+                var Parts = Line.Split('|');
+                if (Parts.Length >= 4)
+                {
+                    Stashes.Add(new StashEntry
+                    {
+                        Index = Index++,
+                        CommitHash = Parts[0],
+                        Branch = Parts[1],
+                        Message = Parts[2],
+                        Timestamp = DateTime.Parse(Parts[3])
+                    });
+                }
+            }
+
+            return Stashes;
+        }
+
+        private void SaveStashes(List<StashEntry> Stashes)
+        {
+            var Lines = new List<string>();
+
+            foreach (var Stash in Stashes)
+            {
+                Lines.Add($"{Stash.CommitHash}|{Stash.Branch}|{Stash.Message}|{Stash.Timestamp:O}");
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(StashPath));
+            File.WriteAllLines(StashPath, Lines);
+        }
+
+        private string GetAuthorInfo()
+        {
+            var Config = RepoMgr.LoadConfig();
+            return $"{Config.UserName ?? "Unknown"} <{Config.UserEmail ?? "unknown@synrix.local"}>";
+        }
+
+        private string GetCurrentCommitMessage()
+        {
+            var CurrentCommit = RepoMgr.GetCurrentCommit();
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                return "Initial commit";
+            }
+
+            try
+            {
+                var Commit = Storage.GetCommit(CurrentCommit);
+                return Commit.Message.Split('\n')[0];
+            }
+            catch
+            {
+                return "Unknown";
+            }
+        }
+
+        private void RestoreWorkingDirectory(string CommitHash)
+        {
+            if (string.IsNullOrEmpty(CommitHash))
+            {
+                return;
+            }
+
+            try
+            {
+                var Tree = CommitMgr.GetCommitTree(CommitHash);
+                var BranchMgr = new BranchManager(RepositoryPath);
+                BranchMgr.CheckoutCommit(CommitHash);
+            }
+            catch
+            {
+                // IGNORE ERRORS
+            }
+        }
+
+        private bool ShouldIgnoreFile(string FilePath)
+        {
+            var IgnorePath = Path.Combine(RepositoryPath, ".synrixignore");
+            if (!File.Exists(IgnorePath))
+            {
+                return false;
+            }
+
+            var IgnorePatterns = File.ReadAllLines(IgnorePath);
+            foreach (var Pattern in IgnorePatterns)
+            {
+                if (FilePath.Contains(Pattern.Trim()))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+}

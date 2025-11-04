@@ -1,0 +1,185 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// HASHUTIL.SRX - HASH UTILITY FUNCTIONS
+// HELPER FUNCTIONS FOR HASHING OPERATIONS
+
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace Synrix.Utils
+{
+    public static class HashUtil
+    {
+        // COMPUTE SHA-256 HASH OF BYTE ARRAY
+        public static string ComputeSha256(byte[] Data)
+        {
+            using (var Sha256 = SHA256.Create())
+            {
+                var HashBytes = Sha256.ComputeHash(Data);
+                return BytesToHex(HashBytes);
+            }
+        }
+
+        // COMPUTE SHA-256 HASH OF STRING
+        public static string ComputeSha256(string Text)
+        {
+            var Bytes = Encoding.UTF8.GetBytes(Text);
+            return ComputeSha256(Bytes);
+        }
+
+        // COMPUTE SHA-256 HASH OF FILE
+        public static string ComputeSha256FromFile(string FilePath)
+        {
+            if (!File.Exists(FilePath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            using (var Sha256 = SHA256.Create())
+            using (var Stream = File.OpenRead(FilePath))
+            {
+                var HashBytes = Sha256.ComputeHash(Stream);
+                return BytesToHex(HashBytes);
+            }
+        }
+
+        // COMPUTE SHA-1 HASH OF BYTE ARRAY
+        public static string ComputeSha1(byte[] Data)
+        {
+            using (var Sha1 = SHA1.Create())
+            {
+                var HashBytes = Sha1.ComputeHash(Data);
+                return BytesToHex(HashBytes);
+            }
+        }
+
+        // COMPUTE SHA-1 HASH OF STRING
+        public static string ComputeSha1(string Text)
+        {
+            var Bytes = Encoding.UTF8.GetBytes(Text);
+            return ComputeSha1(Bytes);
+        }
+
+        // COMPUTE MD5 HASH OF BYTE ARRAY
+        public static string ComputeMd5(byte[] Data)
+        {
+            using (var Md5 = MD5.Create())
+            {
+                var HashBytes = Md5.ComputeHash(Data);
+                return BytesToHex(HashBytes);
+            }
+        }
+
+        // COMPUTE MD5 HASH OF STRING
+        public static string ComputeMd5(string Text)
+        {
+            var Bytes = Encoding.UTF8.GetBytes(Text);
+            return ComputeMd5(Bytes);
+        }
+
+        // CONVERT BYTE ARRAY TO HEX STRING
+        public static string BytesToHex(byte[] Bytes)
+        {
+            return BitConverter.ToString(Bytes).Replace("-", "").ToLower();
+        }
+
+        // CONVERT HEX STRING TO BYTE ARRAY
+        public static byte[] HexToBytes(string Hex)
+        {
+            if (Hex.Length % 2 != 0)
+            {
+                throw new ArgumentException("HEX STRING MUST HAVE EVEN LENGTH");
+            }
+
+            var Bytes = new byte[Hex.Length / 2];
+            
+            for (int I = 0; I < Hex.Length; I += 2)
+            {
+                Bytes[I / 2] = Convert.ToByte(Hex.Substring(I, 2), 16);
+            }
+
+            return Bytes;
+        }
+
+        // VERIFY HASH MATCHES DATA
+        public static bool VerifySha256(byte[] Data, string ExpectedHash)
+        {
+            var ActualHash = ComputeSha256(Data);
+            return ActualHash.Equals(ExpectedHash, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // VERIFY FILE HASH
+        public static bool VerifySha256FromFile(string FilePath, string ExpectedHash)
+        {
+            var ActualHash = ComputeSha256FromFile(FilePath);
+            return ActualHash.Equals(ExpectedHash, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // COMPUTE HASH WITH PREFIX (LIKE GIT)
+        public static string ComputeHashWithPrefix(byte[] Content, string Prefix)
+        {
+            var Header = Encoding.UTF8.GetBytes($"{Prefix} {Content.Length}\0");
+            var DataToHash = new byte[Header.Length + Content.Length];
+            
+            Buffer.BlockCopy(Header, 0, DataToHash, 0, Header.Length);
+            Buffer.BlockCopy(Content, 0, DataToHash, Header.Length, Content.Length);
+
+            return ComputeSha256(DataToHash);
+        }
+
+        // GENERATE RANDOM HASH (FOR TESTING)
+        public static string GenerateRandomHash()
+        {
+            var RandomBytes = new byte[32];
+            using (var Rng = RandomNumberGenerator.Create())
+            {
+                Rng.GetBytes(RandomBytes);
+            }
+            return BytesToHex(RandomBytes);
+        }
+
+        // SHORTEN HASH
+        public static string ShortenHash(string Hash, int Length = 7)
+        {
+            if (string.IsNullOrEmpty(Hash))
+            {
+                return Hash;
+            }
+
+            return Hash.Substring(0, Math.Min(Length, Hash.Length));
+        }
+
+        // VALIDATE HASH FORMAT
+        public static bool IsValidSha256Hash(string Hash)
+        {
+            if (string.IsNullOrEmpty(Hash))
+            {
+                return false;
+            }
+
+            if (Hash.Length != 64)
+            {
+                return false;
+            }
+
+            return System.Text.RegularExpressions.Regex.IsMatch(Hash, "^[0-9a-fA-F]{64}$");
+        }
+
+        // VALIDATE SHORT HASH FORMAT
+        public static bool IsValidShortHash(string Hash)
+        {
+            if (string.IsNullOrEmpty(Hash))
+            {
+                return false;
+            }
+
+            if (Hash.Length < 4 || Hash.Length > 64)
+            {
+                return false;
+            }
+
+            return System.Text.RegularExpressions.Regex.IsMatch(Hash, "^[0-9a-fA-F]+$");
+        }
+    }
+}

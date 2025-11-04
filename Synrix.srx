@@ -1,0 +1,1546 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// SYNRIX.SRX - MAIN COMMAND-LINE INTERFACE
+// ENTRY POINT FOR ALL SYNRIX COMMANDS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using Synrix.Core;
+
+namespace Synrix
+{
+    class Program
+    {
+        static void Main(string[] Args)
+        {
+            try
+            {
+                if (Args.Length == 0)
+                {
+                    ShowHelp();
+                    return;
+                }
+
+                var Command = Args[0].ToLower();
+                var CommandArgs = Args.Skip(1).ToArray();
+
+                ExecuteCommand(Command, CommandArgs);
+            }
+            catch (Exception Ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"ERROR: {Ex.Message}");
+                Console.ResetColor();
+                Environment.Exit(1);
+            }
+        }
+
+        static void ExecuteCommand(string Command, string[] Args)
+        {
+            switch (Command)
+            {
+                case "init":
+                    InitCommand(Args);
+                    break;
+
+                case "config":
+                    ConfigCommand(Args);
+                    break;
+
+                case "add":
+                    AddCommand(Args);
+                    break;
+
+                case "commit":
+                    CommitCommand(Args);
+                    break;
+
+                case "status":
+                    StatusCommand(Args);
+                    break;
+
+                case "log":
+                    LogCommand(Args);
+                    break;
+
+                case "show":
+                    ShowCommand(Args);
+                    break;
+
+                case "branch":
+                    BranchCommand(Args);
+                    break;
+
+                case "checkout":
+                    CheckoutCommand(Args);
+                    break;
+
+                case "switch":
+                    SwitchCommand(Args);
+                    break;
+
+                case "merge":
+                    MergeCommand(Args);
+                    break;
+
+                case "diff":
+                    DiffCommand(Args);
+                    break;
+
+                case "reset":
+                    ResetCommand(Args);
+                    break;
+
+                case "rm":
+                    RemoveCommand(Args);
+                    break;
+
+                case "mv":
+                    MoveCommand(Args);
+                    break;
+
+                case "graph":
+                    GraphCommand(Args);
+                    break;
+
+                case "remote":
+                    RemoteCommand(Args);
+                    break;
+
+                case "push":
+                    PushCommand(Args);
+                    break;
+
+                case "pull":
+                    PullCommand(Args);
+                    break;
+
+                case "fetch":
+                    FetchCommand(Args);
+                    break;
+
+                case "clone":
+                    CloneCommand(Args);
+                    break;
+
+                case "reflog":
+                    ReflogCommand(Args);
+                    break;
+
+                case "stash":
+                    StashCommand(Args);
+                    break;
+
+                case "tag":
+                    TagCommand(Args);
+                    break;
+
+                case "rebase":
+                    RebaseCommand(Args);
+                    break;
+
+                case "undo":
+                    UndoCommand(Args);
+                    break;
+
+                case "redo":
+                    RedoCommand(Args);
+                    break;
+
+                case "lost":
+                    LostCommand(Args);
+                    break;
+
+                case "recover":
+                    RecoverCommand(Args);
+                    break;
+
+                case "help":
+                case "--help":
+                case "-h":
+                    ShowHelp();
+                    break;
+
+                case "version":
+                case "--version":
+                case "-v":
+                    ShowVersion();
+                    break;
+
+                default:
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"UNKNOWN COMMAND: {Command}");
+                    Console.ResetColor();
+                    Console.WriteLine($"RUN 'synrix help' FOR AVAILABLE COMMANDS");
+                    Console.WriteLine();
+                    ShowSuggestions(Command);
+                    break;
+            }
+        }
+
+        // INITIALIZE NEW REPOSITORY
+        static void InitCommand(string[] Args)
+        {
+            var Path = Args.Length > 0 ? Args[0] : Directory.GetCurrentDirectory();
+            var BranchName = "main";
+
+            // PARSE OPTIONS
+            for (int I = 0; I < Args.Length; I++)
+            {
+                if (Args[I] == "-b" && I + 1 < Args.Length)
+                {
+                    BranchName = Args[I + 1];
+                }
+            }
+
+            var RepoManager = new RepositoryManager(Path);
+            RepoManager.InitializeRepository(BranchName);
+        }
+
+        // CONFIGURE REPOSITORY
+        static void ConfigCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RepoManager = new RepositoryManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                // SHOW ALL CONFIG
+                var Config = RepoManager.LoadConfig();
+                Console.WriteLine("CONFIGURATION:");
+                Console.WriteLine($"  user.name = {Config.UserName ?? "(NOT SET)"}");
+                Console.WriteLine($"  user.email = {Config.UserEmail ?? "(NOT SET)"}");
+                Console.WriteLine($"  core.defaultbranch = {Config.DefaultBranch}");
+                Console.WriteLine($"  core.compression = {Config.CoreCompression}");
+                
+                foreach (var Setting in Config.CustomSettings)
+                {
+                    Console.WriteLine($"  {Setting.Key} = {Setting.Value}");
+                }
+            }
+            else if (Args.Length == 1)
+            {
+                // GET CONFIG VALUE
+                var Value = RepoManager.GetConfigValue(Args[0]);
+                if (Value != null)
+                {
+                    Console.WriteLine(Value);
+                }
+                else
+                {
+                    Console.WriteLine($"CONFIG KEY NOT FOUND: {Args[0]}");
+                }
+            }
+            else if (Args.Length >= 2)
+            {
+                // SET CONFIG VALUE
+                RepoManager.SetConfigValue(Args[0], Args[1]);
+                Console.WriteLine($"SET {Args[0]} = {Args[1]}");
+            }
+        }
+
+        // ADD FILES TO STAGING AREA
+        static void AddCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Staging = new StagingArea(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                Console.WriteLine("NOTHING SPECIFIED, NOTHING ADDED");
+                return;
+            }
+
+            if (Args[0] == ".")
+            {
+                Staging.AddAll();
+                Console.WriteLine("ADDED ALL FILES");
+            }
+            else
+            {
+                foreach (var File in Args)
+                {
+                    try
+                    {
+                        Staging.AddFile(File);
+                    }
+                    catch (Exception Ex)
+                    {
+                        Console.WriteLine($"ERROR ADDING {File}: {Ex.Message}");
+                    }
+                }
+            }
+        }
+
+        // COMMIT CHANGES
+        static void CommitCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var CommitMgr = new CommitManager(RepoPath);
+            var MergeMgr = new MergeManager(RepoPath);
+
+            string Message = null;
+            bool Amend = false;
+
+            // PARSE OPTIONS
+            for (int I = 0; I < Args.Length; I++)
+            {
+                if (Args[I] == "-m" && I + 1 < Args.Length)
+                {
+                    Message = Args[I + 1];
+                    I++;
+                }
+                else if (Args[I] == "--amend")
+                {
+                    Amend = true;
+                }
+            }
+
+            if (Amend)
+            {
+                CommitMgr.AmendCommit(Message);
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(Message))
+                {
+                    Console.WriteLine("ERROR: COMMIT MESSAGE REQUIRED (-m)");
+                    return;
+                }
+
+                // CHECK IF MERGE IN PROGRESS
+                if (MergeMgr.IsMergeInProgress())
+                {
+                    MergeMgr.ContinueMerge();
+                }
+                else
+                {
+                    CommitMgr.CreateCommit(Message);
+                }
+            }
+        }
+
+        // SHOW STATUS
+        static void StatusCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RepoManager = new RepositoryManager(RepoPath);
+            var MergeMgr = new MergeManager(RepoPath);
+
+            var Status = RepoManager.GetStatus();
+
+            Console.WriteLine($"ON BRANCH: {Status.CurrentBranch}");
+            
+            if (!string.IsNullOrEmpty(Status.CurrentCommit))
+            {
+                Console.WriteLine($"CURRENT COMMIT: {Status.CurrentCommit.Substring(0, 7)}");
+            }
+            else
+            {
+                Console.WriteLine("NO COMMITS YET");
+            }
+
+            Console.WriteLine();
+
+            // CHECK MERGE STATUS
+            if (MergeMgr.IsMergeInProgress())
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("MERGE IN PROGRESS");
+                Console.ResetColor();
+                Console.WriteLine();
+            }
+
+            if (Status.StagedFiles.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("CHANGES TO BE COMMITTED:");
+                Console.ResetColor();
+                foreach (var File in Status.StagedFiles)
+                {
+                    Console.WriteLine($"  STAGED:   {File}");
+                }
+                Console.WriteLine();
+            }
+
+            if (Status.ModifiedFiles.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("CHANGES NOT STAGED FOR COMMIT:");
+                Console.ResetColor();
+                foreach (var File in Status.ModifiedFiles)
+                {
+                    Console.WriteLine($"  MODIFIED: {File}");
+                }
+                Console.WriteLine();
+            }
+
+            if (Status.DeletedFiles.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("DELETED FILES:");
+                Console.ResetColor();
+                foreach (var File in Status.DeletedFiles)
+                {
+                    Console.WriteLine($"  DELETED:  {File}");
+                }
+                Console.WriteLine();
+            }
+
+            if (Status.UntrackedFiles.Count > 0)
+            {
+                Console.WriteLine("UNTRACKED FILES:");
+                foreach (var File in Status.UntrackedFiles)
+                {
+                    Console.WriteLine($"  UNTRACKED: {File}");
+                }
+                Console.WriteLine();
+            }
+
+            if (Status.StagedFiles.Count == 0 && Status.ModifiedFiles.Count == 0 && 
+                Status.DeletedFiles.Count == 0 && Status.UntrackedFiles.Count == 0)
+            {
+                Console.WriteLine("WORKING TREE CLEAN");
+            }
+        }
+
+        // SHOW LOG
+        static void LogCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var CommitMgr = new CommitManager(RepoPath);
+
+            int MaxCount = 0;
+            bool OneLine = false;
+
+            // PARSE OPTIONS
+            for (int I = 0; I < Args.Length; I++)
+            {
+                if (Args[I] == "-n" && I + 1 < Args.Length)
+                {
+                    MaxCount = int.Parse(Args[I + 1]);
+                    I++;
+                }
+                else if (Args[I] == "--oneline")
+                {
+                    OneLine = true;
+                }
+            }
+
+            CommitMgr.ShowLog(MaxCount, OneLine);
+        }
+
+        // SHOW COMMIT DETAILS
+        static void ShowCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var CommitMgr = new CommitManager(RepoPath);
+
+            var Reference = Args.Length > 0 ? Args[0] : "HEAD";
+            CommitMgr.ShowCommit(Reference);
+        }
+
+        // BRANCH OPERATIONS
+        static void BranchCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var BranchMgr = new BranchManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                // LIST BRANCHES
+                BranchMgr.ShowBranches(false);
+            }
+            else if (Args[0] == "-v" || Args[0] == "--verbose")
+            {
+                BranchMgr.ShowBranches(true);
+            }
+            else if (Args[0] == "-d" && Args.Length > 1)
+            {
+                // DELETE BRANCH
+                BranchMgr.DeleteBranch(Args[1], false);
+            }
+            else if (Args[0] == "-D" && Args.Length > 1)
+            {
+                // FORCE DELETE BRANCH
+                BranchMgr.DeleteBranch(Args[1], true);
+            }
+            else if (Args[0] == "-m" && Args.Length > 2)
+            {
+                // RENAME BRANCH
+                BranchMgr.RenameBranch(Args[1], Args[2]);
+            }
+            else
+            {
+                // CREATE BRANCH
+                var StartPoint = Args.Length > 1 ? Args[1] : null;
+                BranchMgr.CreateBranch(Args[0], StartPoint);
+            }
+        }
+
+        // CHECKOUT COMMAND
+        static void CheckoutCommand(string[] Args)
+        {
+            if (Args.Length == 0)
+            {
+                Console.WriteLine("ERROR: BRANCH OR COMMIT REQUIRED");
+                return;
+            }
+
+            var RepoPath = GetRepositoryRoot();
+            var BranchMgr = new BranchManager(RepoPath);
+
+            bool CreateBranch = false;
+            string Target = Args[0];
+
+            // PARSE OPTIONS
+            for (int I = 0; I < Args.Length; I++)
+            {
+                if (Args[I] == "-b" && I + 1 < Args.Length)
+                {
+                    CreateBranch = true;
+                    Target = Args[I + 1];
+                    break;
+                }
+            }
+
+            if (CreateBranch)
+            {
+                BranchMgr.CreateBranch(Target);
+                BranchMgr.SwitchBranch(Target);
+            }
+            else if (BranchMgr.BranchExists(Target))
+            {
+                BranchMgr.SwitchBranch(Target);
+            }
+            else
+            {
+                BranchMgr.CheckoutCommit(Target);
+            }
+        }
+
+        // SWITCH BRANCH
+        static void SwitchCommand(string[] Args)
+        {
+            if (Args.Length == 0)
+            {
+                Console.WriteLine("ERROR: BRANCH NAME REQUIRED");
+                return;
+            }
+
+            var RepoPath = GetRepositoryRoot();
+            var BranchMgr = new BranchManager(RepoPath);
+
+            bool CreateIfNotExists = false;
+            string BranchName = Args[0];
+
+            for (int I = 0; I < Args.Length; I++)
+            {
+                if (Args[I] == "-c")
+                {
+                    CreateIfNotExists = true;
+                }
+            }
+
+            BranchMgr.SwitchBranch(BranchName, CreateIfNotExists);
+        }
+
+        // MERGE COMMAND
+        static void MergeCommand(string[] Args)
+        {
+            if (Args.Length == 0)
+            {
+                Console.WriteLine("ERROR: BRANCH NAME REQUIRED");
+                return;
+            }
+
+            var RepoPath = GetRepositoryRoot();
+            var MergeMgr = new MergeManager(RepoPath);
+
+            if (Args[0] == "--abort")
+            {
+                MergeMgr.AbortMerge();
+            }
+            else if (Args[0] == "--continue")
+            {
+                MergeMgr.ContinueMerge();
+            }
+            else if (Args[0] == "--status")
+            {
+                MergeMgr.ShowMergeStatus();
+            }
+            else
+            {
+                bool NoFastForward = Args.Contains("--no-ff");
+                MergeMgr.MergeBranch(Args[0], NoFastForward);
+            }
+        }
+
+        // DIFF COMMAND
+        static void DiffCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var CommitMgr = new CommitManager(RepoPath);
+
+            if (Args.Length < 2)
+            {
+                Console.WriteLine("USAGE: synrix diff <commit1> <commit2>");
+                return;
+            }
+
+            var Differences = CommitMgr.GetDifferences(Args[0], Args[1]);
+
+            Console.WriteLine($"DIFFERENCES BETWEEN {Args[0]} AND {Args[1]}:");
+            Console.WriteLine();
+
+            foreach (var Diff in Differences)
+            {
+                var Color = ConsoleColor.White;
+                
+                if (Diff.Value == "ADDED")
+                    Color = ConsoleColor.Green;
+                else if (Diff.Value == "DELETED")
+                    Color = ConsoleColor.Red;
+                else if (Diff.Value == "MODIFIED")
+                    Color = ConsoleColor.Yellow;
+
+                Console.ForegroundColor = Color;
+                Console.WriteLine($"{Diff.Value,-10} {Diff.Key}");
+                Console.ResetColor();
+            }
+        }
+
+        // RESET COMMAND
+        static void ResetCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Staging = new StagingArea(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                Staging.Clear();
+                Console.WriteLine("RESET STAGING AREA");
+            }
+            else
+            {
+                foreach (var File in Args)
+                {
+                    Staging.UnstageFile(File);
+                }
+            }
+        }
+
+        // REMOVE COMMAND
+        static void RemoveCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Staging = new StagingArea(RepoPath);
+
+            foreach (var File in Args)
+            {
+                Staging.RemoveFile(File);
+            }
+        }
+
+        // MOVE/RENAME COMMAND
+        static void MoveCommand(string[] Args)
+        {
+            if (Args.Length < 2)
+            {
+                Console.WriteLine("USAGE: synrix mv <source> <destination>");
+                return;
+            }
+
+            var RepoPath = GetRepositoryRoot();
+            var SourcePath = Path.Combine(RepoPath, Args[0]);
+            var DestPath = Path.Combine(RepoPath, Args[1]);
+
+            if (!File.Exists(SourcePath))
+            {
+                Console.WriteLine($"SOURCE FILE NOT FOUND: {Args[0]}");
+                return;
+            }
+
+            File.Move(SourcePath, DestPath);
+
+            var Staging = new StagingArea(RepoPath);
+            Staging.RemoveFile(Args[0]);
+            Staging.AddFile(Args[1]);
+
+            Console.WriteLine($"MOVED: {Args[0]} -> {Args[1]}");
+        }
+
+        // GRAPH COMMAND
+        static void GraphCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var BranchMgr = new BranchManager(RepoPath);
+
+            int MaxCount = 20;
+
+            if (Args.Length > 0 && int.TryParse(Args[0], out int Count))
+            {
+                MaxCount = Count;
+            }
+
+            BranchMgr.ShowGraph(MaxCount);
+        }
+
+        // ========== REMOTE OPERATIONS ==========
+
+        // REMOTE COMMAND
+        static void RemoteCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RemoteMgr = new RemoteManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                RemoteMgr.ListRemotes();
+                return;
+            }
+
+            var SubCommand = Args[0].ToLower();
+
+            switch (SubCommand)
+            {
+                case "add":
+                    if (Args.Length < 3)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Remote Name And URL Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix remote add <name> <url>");
+                        return;
+                    }
+                    RemoteMgr.AddRemote(Args[1], Args[2]);
+                    break;
+
+                case "remove":
+                case "rm":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Remote Name Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix remote remove <name>");
+                        return;
+                    }
+                    RemoteMgr.RemoveRemote(Args[1]);
+                    break;
+
+                case "list":
+                case "-v":
+                    RemoteMgr.ListRemotes();
+                    break;
+
+                default:
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"ERROR: Unknown Remote SubCommand: {SubCommand}");
+                    Console.ResetColor();
+                    Console.WriteLine("AVAILABLE: add, remove, list");
+                    break;
+            }
+        }
+
+        // PUSH COMMAND
+        static void PushCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RepoManager = new RepositoryManager(RepoPath);
+            var RemoteMgr = new RemoteManager(RepoPath);
+
+            string remoteName = Args.Length > 0 ? Args[0] : "origin";
+            string branchName = Args.Length > 1 ? Args[1] : RepoManager.GetCurrentBranch();
+
+            if (string.IsNullOrEmpty(branchName))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Not On Any Branch");
+                Console.ResetColor();
+                return;
+            }
+
+            bool force = Args.Contains("--force") || Args.Contains("-f");
+
+            Console.WriteLine($"Pushing {branchName} To {remoteName}...");
+            var result = RemoteMgr.PushAsync(remoteName, branchName, force).GetAwaiter().GetResult();
+
+            if (result.Success)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"✓ Push Successful!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ Push Failed : {result.Message}");
+                Console.ResetColor();
+            }
+        }
+
+        // PULL COMMAND
+        static void PullCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RepoManager = new RepositoryManager(RepoPath);
+            var RemoteMgr = new RemoteManager(RepoPath);
+
+            string remoteName = Args.Length > 0 ? Args[0] : "origin";
+            string branchName = Args.Length > 1 ? Args[1] : RepoManager.GetCurrentBranch();
+
+            if (string.IsNullOrEmpty(branchName))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Not On Any Branch");
+                Console.ResetColor();
+                return;
+            }
+
+            Console.WriteLine($"Pulling {branchName} From {remoteName}...");
+            var success = RemoteMgr.PullAsync(remoteName, branchName).GetAwaiter().GetResult();
+
+            if (success)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"✓ Pull Successful!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ Pull Failed");
+                Console.ResetColor();
+            }
+        }
+
+        // FETCH COMMAND
+        static void FetchCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RemoteMgr = new RemoteManager(RepoPath);
+
+            string remoteName = Args.Length > 0 ? Args[0] : "origin";
+            string branchName = Args.Length > 1 ? Args[1] : null;
+
+            Console.WriteLine($"Fetching From {remoteName}...");
+            var result = RemoteMgr.FetchAsync(remoteName, branchName).GetAwaiter().GetResult();
+
+            if (result.Success)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"✓ Fetch Successful!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ Fetch Failed : {result.Message}");
+                Console.ResetColor();
+            }
+        }
+
+        // CLONE COMMAND
+        static void CloneCommand(string[] Args)
+        {
+            if (Args.Length < 1)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Repository URL Required");
+                Console.ResetColor();
+                Console.WriteLine("USAGE: synrix clone <url> [directory]");
+                return;
+            }
+
+            string sourceUrl = Args[0];
+            string targetPath = Args.Length > 1 ? Args[1] : Path.GetFileName(sourceUrl.TrimEnd('/'));
+
+            targetPath = Path.GetFullPath(targetPath);
+
+            Console.WriteLine($"Cloning {sourceUrl} Into {targetPath}...");
+
+            var success = RemoteManager.CloneAsync(sourceUrl, targetPath).GetAwaiter().GetResult();
+
+            if (success)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"✓ Clone Successful!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ Clone Failed");
+                Console.ResetColor();
+            }
+        }
+
+        // ========== REFLOG OPERATIONS ==========
+
+        // REFLOG COMMAND
+        static void ReflogCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var RepoManager = new RepositoryManager(RepoPath);
+            var ReflogMgr = new ReflogManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                var currentBranch = RepoManager.GetCurrentBranch();
+                if (string.IsNullOrEmpty(currentBranch))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("ERROR: Not On Any Branch");
+                    Console.ResetColor();
+                    return;
+                }
+                ReflogMgr.ShowReflog($"refs/heads/{currentBranch}", 20);
+                return;
+            }
+
+            var subCommand = Args[0].ToLower();
+
+            switch (subCommand)
+            {
+                case "show":
+                    string refName = Args.Length > 1 ? Args[1] : $"refs/heads/{RepoManager.GetCurrentBranch()}";
+                    int count = Args.Length > 2 && int.TryParse(Args[2], out int c) ? c : 20;
+                    ReflogMgr.ShowReflog(refName, count);
+                    break;
+
+                case "list":
+                    ReflogMgr.ListAllReflogs();
+                    break;
+
+                default:
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"ERROR: Unknown Reflog Subcommand: {subCommand}");
+                    Console.ResetColor();
+                    Console.WriteLine("AVAILABLE : show, list");
+                    break;
+            }
+        }
+
+        // ========== STASH OPERATIONS ==========
+
+        // STASH COMMAND
+        static void StashCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var StagingMgr = new StagingArea(RepoPath);
+            var CommitMgr = new CommitManager(RepoPath);
+            var StashMgr = new StashManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                StashMgr.ListStashes();
+                return;
+            }
+
+            var subCommand = Args[0].ToLower();
+
+            switch (subCommand)
+            {
+                case "save":
+                case "push":
+                    string message = Args.Length > 1 ? string.Join(" ", Args.Skip(1)) : "WIP";
+                    StashMgr.SaveStash(message);
+                    break;
+
+                case "list":
+                    StashMgr.ListStashes();
+                    break;
+
+                case "apply":
+                    int applyIndex = Args.Length > 1 && int.TryParse(Args[1], out int ai) ? ai : 0;
+                    StashMgr.ApplyStash(applyIndex);
+                    break;
+
+                case "pop":
+                    int popIndex = Args.Length > 1 && int.TryParse(Args[1], out int pi) ? pi : 0;
+                    StashMgr.PopStash(popIndex);
+                    break;
+
+                case "drop":
+                    int dropIndex = Args.Length > 1 && int.TryParse(Args[1], out int di) ? di : 0;
+                    StashMgr.DropStash(dropIndex);
+                    break;
+
+                case "clear":
+                    StashMgr.ClearStashes();
+                    break;
+
+                case "show":
+                    int showIndex = Args.Length > 1 && int.TryParse(Args[1], out int si) ? si : 0;
+                    StashMgr.ShowStash(showIndex);
+                    break;
+
+                case "branch":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Branch Name Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix stash branch <branchname> [stashindex]");
+                        return;
+                    }
+                    string branchName = Args[1];
+                    int stashIndex = Args.Length > 2 && int.TryParse(Args[2], out int bi) ? bi : 0;
+                    StashMgr.CreateBranchFromStash(branchName, stashIndex);
+                    break;
+
+                default:
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"ERROR: Unknown Stash SubCommand: {subCommand}");
+                    Console.ResetColor();
+                    Console.WriteLine("AVAILABLE: save, list, apply, pop, drop, clear, show, branch");
+                    break;
+            }
+        }
+
+        // ========== TAG OPERATIONS ==========
+
+        // TAG COMMAND
+        static void TagCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var TagMgr = new TagManager(RepoPath);
+
+            if (Args.Length == 0)
+            {
+                TagMgr.ListTags();
+                return;
+            }
+
+            var subCommand = Args[0].ToLower();
+
+            switch (subCommand)
+            {
+                case "create":
+                case "add":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Tag Name Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix tag create <tagname> [-a] [-m <message>] [commit]");
+                        return;
+                    }
+
+                    string tagName = Args[1];
+                    bool annotated = Args.Contains("-a") || Args.Contains("--annotated");
+                    string message = null;
+                    string commitHash = null;
+
+                    for (int i = 2; i < Args.Length; i++)
+                    {
+                        if (Args[i] == "-m" && i + 1 < Args.Length)
+                        {
+                            message = Args[i + 1];
+                            i++;
+                        }
+                        else if (!Args[i].StartsWith("-") && commitHash == null)
+                        {
+                            commitHash = Args[i];
+                        }
+                    }
+
+                    if (annotated)
+                    {
+                        if (string.IsNullOrEmpty(message))
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine("ERROR: Annotated Tags Require a Message (-m)");
+                            Console.ResetColor();
+                            return;
+                        }
+                        TagMgr.CreateAnnotatedTag(tagName, message, commitHash);
+                    }
+                    else
+                    {
+                        TagMgr.CreateLightweightTag(tagName, commitHash);
+                    }
+                    break;
+
+                case "delete":
+                case "remove":
+                case "rm":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Tag Name Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix tag delete <tagname>");
+                        return;
+                    }
+                    TagMgr.DeleteTag(Args[1]);
+                    break;
+
+                case "list":
+                    string pattern = Args.Length > 1 ? Args[1] : null;
+                    TagMgr.ListTags(pattern);
+                    break;
+
+                case "show":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Tag Name Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix tag show <tagname>");
+                        return;
+                    }
+                    TagMgr.ShowTag(Args[1]);
+                    break;
+
+                default:
+                    // Assume It's A Tag Name For Quick Creation
+                    TagMgr.CreateLightweightTag(subCommand);
+                    break;
+            }
+        }
+
+        // ========== REBASE OPERATIONS ==========
+
+        // REBASE COMMAND
+        static void RebaseCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var CommitMgr = new CommitManager(RepoPath);
+            var MergeMgr = new MergeManager(RepoPath);
+            var StagingMgr = new StagingArea(RepoPath);
+            var RebaseMgr = new RebaseManager(Storage, RepoManager, CommitMgr, MergeMgr, StagingMgr);
+
+            if (Args.Length == 0)
+            {
+                RebaseMgr.ShowStatus();
+                return;
+            }
+
+            var subCommand = Args[0].ToLower();
+
+            switch (subCommand)
+            {
+                case "--continue":
+                    RebaseMgr.ContinueRebase();
+                    break;
+
+                case "--abort":
+                    RebaseMgr.AbortRebase();
+                    break;
+
+                case "--skip":
+                    RebaseMgr.SkipCommit();
+                    break;
+
+                case "--status":
+                    RebaseMgr.ShowStatus();
+                    break;
+
+                case "-i":
+                case "--interactive":
+                    if (Args.Length < 2)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine("ERROR: Target Branch Required");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix rebase -i <branch>");
+                        return;
+                    }
+                    string sourceBranch = RepoManager.GetCurrentBranch();
+                    string targetBranch = Args[1];
+                    RebaseMgr.StartInteractiveRebase(sourceBranch, targetBranch);
+                    break;
+
+                default:
+                    // Simple Rebase
+                    string currentBranch = RepoManager.GetCurrentBranch();
+                    RebaseMgr.StartRebase(currentBranch, subCommand);
+                    break;
+            }
+        }
+
+        // ========== UNDO/REDO OPERATIONS ==========
+
+        // UNDO COMMAND
+        static void UndoCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var BranchMgr = new BranchManager(RepoPath);
+            var ReflogMgr = new ReflogManager(RepoPath);
+            var UndoMgr = new UndoManager(ReflogMgr, RepoManager, BranchMgr, Storage);
+
+            if (Args.Length == 0)
+            {
+                UndoMgr.Undo(1);
+                return;
+            }
+
+            var arg = Args[0].ToLower();
+
+            switch (arg)
+            {
+                case "commit":
+                    UndoMgr.UndoOperation(UndoableOperation.Commit);
+                    break;
+
+                case "merge":
+                    UndoMgr.UndoOperation(UndoableOperation.Merge);
+                    break;
+
+                case "reset":
+                    UndoMgr.UndoOperation(UndoableOperation.Reset);
+                    break;
+
+                case "rebase":
+                    UndoMgr.UndoOperation(UndoableOperation.Rebase);
+                    break;
+
+                case "list":
+                case "show":
+                    int showCount = Args.Length > 1 && int.TryParse(Args[1], out int sc) ? sc : 10;
+                    UndoMgr.ShowUndoableOperations(showCount);
+                    break;
+
+                default:
+                    // Try To Parse As Number Of Steps
+                    if (int.TryParse(arg, out int steps))
+                    {
+                        UndoMgr.Undo(steps);
+                    }
+                    else if (arg.Length >= 7) // Possibly A Commit Hash
+                    {
+                        UndoMgr.UndoToCommit(arg);
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"ERROR: Unknown Undo Target: {arg}");
+                        Console.ResetColor();
+                        Console.WriteLine("USAGE: synrix undo [steps|commit|merge|reset|<hash>]");
+                    }
+                    break;
+            }
+        }
+
+        // REDO COMMAND
+        static void RedoCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var BranchMgr = new BranchManager(RepoPath);
+            var ReflogMgr = new ReflogManager(RepoPath);
+            var UndoMgr = new UndoManager(ReflogMgr, RepoManager, BranchMgr, Storage);
+
+            UndoMgr.Redo();
+        }
+
+        // LOST COMMAND
+        static void LostCommand(string[] Args)
+        {
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var ReflogMgr = new ReflogManager(RepoPath);
+
+            Console.WriteLine("Searching For Lost Commits...\n");
+            var lostCommits = ReflogMgr.FindLostCommits();
+
+            if (lostCommits.Count == 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("✓ No Lost Commits Found. All Commits Are Reachable!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Found {lostCommits.Count} Lost Commit(s):");
+                Console.ResetColor();
+                Console.WriteLine();
+
+                foreach (var commitHash in lostCommits)
+                {
+                    var commit = Storage.ReadCommit(commitHash);
+                    if (commit != null)
+                    {
+                        Console.WriteLine($"  {commitHash[..8]} - {commit.Message.Split('\n')[0]}");
+                        Console.WriteLine($"    Author: {commit.Author}");
+                        Console.WriteLine($"    Date: {commit.Timestamp}");
+                        Console.WriteLine();
+                    }
+                }
+
+                Console.WriteLine("To Recover A Commit : synrix recover <hash>");
+            }
+        }
+
+        // RECOVER COMMAND
+        static void RecoverCommand(string[] Args)
+        {
+            if (Args.Length == 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: Commit Hash Required");
+                Console.ResetColor();
+                Console.WriteLine("USAGE: synrix recover <hash>");
+                Console.WriteLine("Find Lost Commits With: synrix lost");
+                return;
+            }
+
+            var RepoPath = GetRepositoryRoot();
+            var Storage = new ObjectStorage(RepoPath);
+            var RepoManager = new RepositoryManager(RepoPath);
+            var ReflogMgr = new ReflogManager(RepoPath);
+
+            string commitHash = Args[0];
+            bool success = ReflogMgr.RecoverCommit(commitHash);
+
+            if (success)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"✓ Commit {commitHash[..8]} Recovered Successfully!");
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ Failed To Recover Commit {commitHash[..8]}");
+                Console.ResetColor();
+            }
+        }
+
+        // GET REPOSITORY ROOT
+        static string GetRepositoryRoot()
+        {
+            var RepoPath = RepositoryManager.FindRepositoryRoot(Directory.GetCurrentDirectory());
+            
+            if (string.IsNullOrEmpty(RepoPath))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("ERROR: NOT A SYNRIX REPOSITORY");
+                Console.ResetColor();
+                Console.WriteLine();
+                Console.WriteLine("SOLUTION: Initialize A Repository With 'synrix init'");
+                throw new InvalidOperationException("NOT A SYNRIX REPOSITORY");
+            }
+
+            return RepoPath;
+        }
+
+        // SHOW COMMAND SUGGESTIONS
+        static void ShowSuggestions(string command)
+        {
+            var allCommands = new[]
+            {
+                "init", "config", "add", "commit", "status", "log", "show",
+                "branch", "checkout", "switch", "merge", "diff", "reset",
+                "rm", "mv", "graph", "remote", "push", "pull", "fetch",
+                "clone", "reflog", "stash", "tag", "rebase", "undo", "redo",
+                "lost", "recover", "help", "version"
+            };
+
+            var suggestions = allCommands
+                .Where(c => LevenshteinDistance(command, c) <= 2)
+                .OrderBy(c => LevenshteinDistance(command, c))
+                .Take(3)
+                .ToList();
+
+            if (suggestions.Any())
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("DID YOU MEAN:");
+                Console.ResetColor();
+                foreach (var suggestion in suggestions)
+                {
+                    Console.WriteLine($"  synrix {suggestion}");
+                }
+            }
+        }
+
+        // LEVENSHTEIN DISTANCE FOR FUZZY MATCHING
+        static int LevenshteinDistance(string s, string t)
+        {
+            if (string.IsNullOrEmpty(s))
+                return string.IsNullOrEmpty(t) ? 0 : t.Length;
+            if (string.IsNullOrEmpty(t))
+                return s.Length;
+
+            int[,] d = new int[s.Length + 1, t.Length + 1];
+
+            for (int i = 0; i <= s.Length; i++)
+                d[i, 0] = i;
+            for (int j = 0; j <= t.Length; j++)
+                d[0, j] = j;
+
+            for (int i = 1; i <= s.Length; i++)
+            {
+                for (int j = 1; j <= t.Length; j++)
+                {
+                    int cost = (t[j - 1] == s[i - 1]) ? 0 : 1;
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                }
+            }
+
+            return d[s.Length, t.Length];
+        }
+
+        // SHOW HELP
+        static void ShowHelp()
+        {
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║  SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION         ║");
+            Console.WriteLine("║  VERSION 2.0.0 - PRODUCTION RELEASE                          ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
+            Console.WriteLine("USAGE: synrix <command> [options]");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("═══ REPOSITORY SETUP ═══");
+            Console.ResetColor();
+            Console.WriteLine("  init              Initialize A New Repository");
+            Console.WriteLine("  config            Get Or Set Configuration Values");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("═══ BASIC OPERATIONS ═══");
+            Console.ResetColor();
+            Console.WriteLine("  add <files>       Add Files To Staging Area");
+            Console.WriteLine("  commit -m <msg>   Commit Staged Changes");
+            Console.WriteLine("  status            Show Working Tree Status");
+            Console.WriteLine("  log               Show Commit History");
+            Console.WriteLine("  show <commit>     Show Commit Details");
+            Console.WriteLine("  diff <c1> <c2>    Show Differences Between Commits");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("═══ BRANCHING & MERGING ═══");
+            Console.ResetColor();
+            Console.WriteLine("  branch            List, Create, Or Delete Branches");
+            Console.WriteLine("  switch <branch>   Switch To A Branch");
+            Console.WriteLine("  checkout <ref>    Switch Branches Or Restore Files");
+            Console.WriteLine("  merge <branch>    Merge Branches");
+            Console.WriteLine("  rebase <branch>   Rebase Current Branch Onto Another");
+            Console.WriteLine("    -i, --interactive   Interactive Rebase Mode");
+            Console.WriteLine("    --continue      Continue Rebase After Resolving Conflicts");
+            Console.WriteLine("    --abort         Abort Rebase Operation");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Magenta;
+            Console.WriteLine("═══ REMOTE OPERATIONS ═══");
+            Console.ResetColor();
+            Console.WriteLine("  remote            Manage Remote Repositories");
+            Console.WriteLine("    add <name> <url>    Add New Remote");
+            Console.WriteLine("    remove <name>       Remove Remote");
+            Console.WriteLine("    list               List All Remotes");
+            Console.WriteLine("  push [remote] [branch]  Push Commits To Remote");
+            Console.WriteLine("  pull [remote] [branch]  Fetch And Merge From Remote");
+            Console.WriteLine("  fetch [remote]          Download Objects From Remote");
+            Console.WriteLine("  clone <url> [dir]       Clone A Repository");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine("═══ ADVANCED FEATURES ═══");
+            Console.ResetColor();
+            Console.WriteLine("  stash             Temporarily Store Modified Files");
+            Console.WriteLine("    save <message>      Save changes with description");
+            Console.WriteLine("    list               Show All Stashes");
+            Console.WriteLine("    apply [index]      Apply Stashed Changes");
+            Console.WriteLine("    pop [index]        Apply And Remove Stash");
+            Console.WriteLine("    drop [index]       Delete A Stash");
+            Console.WriteLine("  tag               Manage Version Tags");
+            Console.WriteLine("    create <name>       Create Lightweight Tag");
+            Console.WriteLine("    create -a <name>    Create Annotated Tag");
+            Console.WriteLine("    list [pattern]      List Tags");
+            Console.WriteLine("    delete <name>       Delete Tag");
+            Console.WriteLine("  reflog            Show Reference Log");
+            Console.WriteLine("    show [ref]          Show Reflog For Reference");
+            Console.WriteLine("    list               List All Reflogs");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("═══ SAFETY & RECOVERY ═══");
+            Console.ResetColor();
+            Console.WriteLine("  undo [steps]      Undo Last Operation(s)");
+            Console.WriteLine("    commit            Undo Last Commit");
+            Console.WriteLine("    merge             Undo Last Merge");
+            Console.WriteLine("    list              Show Undoable Operations");
+            Console.WriteLine("  redo              Redo Last Undone Operation");
+            Console.WriteLine("  lost              Find Lost (Unreachable) Commits");
+            Console.WriteLine("  recover <hash>    Recover A Lost Commit");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("═══ FILE OPERATIONS ═══");
+            Console.ResetColor();
+            Console.WriteLine("  rm <file>         Remove File From Index");
+            Console.WriteLine("  mv <src> <dst>    Move or Rename File");
+            Console.WriteLine("  reset [file]      Unstage Files");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.DarkCyan;
+            Console.WriteLine("═══ VISUALIZATION ═══");
+            Console.ResetColor();
+            Console.WriteLine("  graph [count]     Show Commit Graph");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Gray;
+            Console.WriteLine("═══ HELP & INFO ═══");
+            Console.ResetColor();
+            Console.WriteLine("  help              Show This Help Message");
+            Console.WriteLine("  version           Show Version Information");
+            Console.WriteLine();
+            
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("═══ WHY SYNRIX? ═══");
+            Console.ResetColor();
+            Console.WriteLine("  ✓ Simple Undo       - Just Type 'synrix undo'");
+            Console.WriteLine("  ✓ Safe by Default   - Confirmations Prevent Data Loss");
+            Console.WriteLine("  ✓ Clear Commands    - No More Checkout Confusion");
+            Console.WriteLine("  ✓ Complete Reflog   - Never Lose Work");
+            Console.WriteLine("  ✓ Smart Stashes     - Descriptive Names, Not Stash@{0}");
+            Console.WriteLine("  ✓ Helpful Errors    - Actionable Suggestions");
+            Console.WriteLine();
+            Console.WriteLine("For more information: https://synrix.dev");
+            Console.WriteLine("Documentation : See WHY_SYNRIX.md In Repository");
+        }
+
+        // SHOW VERSION
+        static void ShowVersion()
+        {
+            Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            Console.WriteLine("║  SYNRIX VERSION 2.0.0 - PRODUCTION RELEASE                   ║");
+            Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            Console.WriteLine();
+            Console.WriteLine("SYNCHRONIZED REPOSITORY INDEXING EXTENSION");
+            Console.WriteLine("COPYRIGHT (C) 2025 SYNRIX PROJECT");
+            Console.WriteLine();
+            Console.WriteLine("FEATURES:");
+            Console.WriteLine("  • Distributed Version Control System");
+            Console.WriteLine("  • SHA-256 Content Addressing");
+            Console.WriteLine("  • GZIP Compression");
+            Console.WriteLine("  • Three-Way Merge Algorithm");
+            Console.WriteLine("  • Interactive Rebase");
+            Console.WriteLine("  • Complete Reflog Protection");
+            Console.WriteLine("  • Simple Undo/Redo");
+            Console.WriteLine("  • Remote Operations (Local & HTTP)");
+            Console.WriteLine("  • Advanced Stash Management");
+            Console.WriteLine("  • Lightweight & Annotated Tags");
+            Console.WriteLine();
+            Console.WriteLine("LICENSE: MIT");
+            Console.WriteLine("REPOSITORY: https://github.com/synrix/synrix");
+        }
+    }
+}

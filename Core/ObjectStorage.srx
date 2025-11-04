@@ -1,0 +1,405 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// OBJECTSTORAGE.SRX - CORE OBJECT STORAGE ENGINE
+// HANDLES BLOB, TREE, AND COMMIT OBJECT STORAGE USING SHA-256 HASHING
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace Synrix.Core
+{
+    // OBJECT TYPES IN SYNRIX
+    public enum ObjectType
+    {
+        Blob,      // FILE CONTENT
+        Tree,      // DIRECTORY STRUCTURE
+        Commit,    // COMMIT OBJECT
+        Tag        // TAG OBJECT
+    }
+
+    // REPRESENTS A STORED OBJECT IN THE REPOSITORY
+    public class SynrixObject
+    {
+        public string Hash { get; set; }
+        public ObjectType Type { get; set; }
+        public byte[] Content { get; set; }
+        public Dictionary<string, string> Metadata { get; set; }
+
+        public SynrixObject()
+        {
+            Metadata = new Dictionary<string, string>();
+        }
+    }
+
+    // TREE ENTRY REPRESENTS A FILE OR DIRECTORY IN A TREE OBJECT
+    public class TreeEntry
+    {
+        public string Mode { get; set; }        // FILE PERMISSIONS
+        public string Type { get; set; }        // BLOB OR TREE
+        public string Hash { get; set; }        // OBJECT HASH
+        public string Name { get; set; }        // FILE/DIRECTORY NAME
+    }
+
+    // COMMIT OBJECT STRUCTURE
+    public class CommitObject
+    {
+        public string TreeHash { get; set; }
+        public List<string> ParentHashes { get; set; }
+        public string Author { get; set; }
+        public string Committer { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Message { get; set; }
+
+        public CommitObject()
+        {
+            ParentHashes = new List<string>();
+        }
+    }
+
+    // MAIN OBJECT STORAGE CLASS
+    public class ObjectStorage
+    {
+        private readonly string ObjectsPath;
+        private readonly string PacksPath;
+
+        public ObjectStorage(string RepositoryPath)
+        {
+            ObjectsPath = Path.Combine(RepositoryPath, ".synrix", "objects");
+            PacksPath = Path.Combine(RepositoryPath, ".synrix", "packs");
+            InitializeStorage();
+        }
+
+        // INITIALIZE STORAGE DIRECTORIES
+        private void InitializeStorage()
+        {
+            Directory.CreateDirectory(ObjectsPath);
+            Directory.CreateDirectory(PacksPath);
+        }
+
+        // COMPUTE SHA-256 HASH OF CONTENT
+        public string ComputeHash(byte[] Content, ObjectType Type)
+        {
+            using (var Sha256 = SHA256.Create())
+            {
+                // PREPEND TYPE AND LENGTH TO CONTENT (LIKE GIT)
+                var Header = Encoding.UTF8.GetBytes($"{Type.ToString().ToLower()} {Content.Length}\0");
+                var DataToHash = new byte[Header.Length + Content.Length];
+                Buffer.BlockCopy(Header, 0, DataToHash, 0, Header.Length);
+                Buffer.BlockCopy(Content, 0, DataToHash, Header.Length, Content.Length);
+
+                var HashBytes = Sha256.ComputeHash(DataToHash);
+                return BitConverter.ToString(HashBytes).Replace("-", "").ToLower();
+            }
+        }
+
+        // STORE AN OBJECT IN THE REPOSITORY
+        public string StoreObject(byte[] Content, ObjectType Type, Dictionary<string, string> Metadata = null)
+        {
+            var Hash = ComputeHash(Content, Type);
+            var ObjectPath = GetObjectPath(Hash);
+
+            // DON'T STORE IF ALREADY EXISTS
+            if (File.Exists(ObjectPath))
+            {
+                return Hash;
+            }
+
+            // CREATE DIRECTORY FOR OBJECT (FIRST 2 CHARS OF HASH)
+            Directory.CreateDirectory(Path.GetDirectoryName(ObjectPath));
+
+            // CREATE SYNRIX OBJECT
+            var SynrixObj = new SynrixObject
+            {
+                Hash = Hash,
+                Type = Type,
+                Content = Content,
+                Metadata = Metadata ?? new Dictionary<string, string>()
+            };
+
+            // SERIALIZE AND COMPRESS OBJECT
+            var JsonData = JsonSerializer.Serialize(SynrixObj);
+            var CompressedData = CompressData(Encoding.UTF8.GetBytes(JsonData));
+
+            // WRITE TO DISK
+            File.WriteAllBytes(ObjectPath, CompressedData);
+
+            return Hash;
+        }
+
+        // STORE A SYNRIX OBJECT (FOR CLONING/FETCHING)
+        public string StoreObject(SynrixObject Obj)
+        {
+            return StoreObject(Obj.Content, Obj.Type, Obj.Metadata);
+        }
+
+        // STORE A BLOB (FILE CONTENT)
+        public string StoreBlob(byte[] FileContent)
+        {
+            return StoreObject(FileContent, ObjectType.Blob);
+        }
+
+        // STORE A TREE (DIRECTORY STRUCTURE)
+        public string StoreTree(List<TreeEntry> Entries)
+        {
+            // SERIALIZE TREE ENTRIES
+            var TreeContent = SerializeTree(Entries);
+            return StoreObject(Encoding.UTF8.GetBytes(TreeContent), ObjectType.Tree);
+        }
+
+        // STORE A COMMIT
+        public string StoreCommit(CommitObject Commit)
+        {
+            var CommitContent = SerializeCommit(Commit);
+            return StoreObject(Encoding.UTF8.GetBytes(CommitContent), ObjectType.Commit);
+        }
+
+        // RETRIEVE AN OBJECT BY HASH
+        public SynrixObject GetObject(string Hash)
+        {
+            var ObjectPath = GetObjectPath(Hash);
+
+            if (!File.Exists(ObjectPath))
+            {
+                throw new FileNotFoundException($"OBJECT NOT FOUND: {Hash}");
+            }
+
+            // READ AND DECOMPRESS
+            var CompressedData = File.ReadAllBytes(ObjectPath);
+            var JsonData = DecompressData(CompressedData);
+            var JsonString = Encoding.UTF8.GetString(JsonData);
+
+            return JsonSerializer.Deserialize<SynrixObject>(JsonString);
+        }
+
+        // GET BLOB CONTENT
+        public byte[] GetBlob(string Hash)
+        {
+            var Obj = GetObject(Hash);
+            if (Obj.Type != ObjectType.Blob)
+            {
+                throw new InvalidOperationException($"OBJECT {Hash} IS NOT A BLOB");
+            }
+            return Obj.Content;
+        }
+
+        // GET TREE ENTRIES
+        public List<TreeEntry> GetTree(string Hash)
+        {
+            var Obj = GetObject(Hash);
+            if (Obj.Type != ObjectType.Tree)
+            {
+                throw new InvalidOperationException($"OBJECT {Hash} IS NOT A TREE");
+            }
+            return DeserializeTree(Encoding.UTF8.GetString(Obj.Content));
+        }
+
+        // GET COMMIT OBJECT
+        public CommitObject GetCommit(string Hash)
+        {
+            var Obj = GetObject(Hash);
+            if (Obj.Type != ObjectType.Commit)
+            {
+                throw new InvalidOperationException($"OBJECT {Hash} IS NOT A COMMIT");
+            }
+            return DeserializeCommit(Encoding.UTF8.GetString(Obj.Content));
+        }
+
+        // ALIAS FOR GetCommit - for compatibility
+        public CommitObject? ReadCommit(string hash)
+        {
+            try
+            {
+                return GetCommit(hash);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // CHECK IF OBJECT EXISTS
+        public bool ObjectExists(string Hash)
+        {
+            return File.Exists(GetObjectPath(Hash));
+        }
+
+        // GET OBJECT PATH FROM HASH
+        private string GetObjectPath(string Hash)
+        {
+            // STORE IN SUBDIRECTORIES LIKE GIT (FIRST 2 CHARS)
+            var SubDir = Hash.Substring(0, 2);
+            var FileName = Hash.Substring(2);
+            return Path.Combine(ObjectsPath, SubDir, FileName);
+        }
+
+        // SERIALIZE TREE ENTRIES TO STRING
+        private string SerializeTree(List<TreeEntry> Entries)
+        {
+            var Builder = new StringBuilder();
+            foreach (var Entry in Entries.OrderBy(e => e.Name))
+            {
+                Builder.AppendLine($"{Entry.Mode} {Entry.Type} {Entry.Hash}\t{Entry.Name}");
+            }
+            return Builder.ToString();
+        }
+
+        // DESERIALIZE TREE FROM STRING
+        private List<TreeEntry> DeserializeTree(string Content)
+        {
+            var Entries = new List<TreeEntry>();
+            var Lines = Content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var Line in Lines)
+            {
+                var Parts = Line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (Parts.Length >= 4)
+                {
+                    Entries.Add(new TreeEntry
+                    {
+                        Mode = Parts[0],
+                        Type = Parts[1],
+                        Hash = Parts[2],
+                        Name = string.Join(" ", Parts.Skip(3))
+                    });
+                }
+            }
+
+            return Entries;
+        }
+
+        // SERIALIZE COMMIT TO STRING
+        private string SerializeCommit(CommitObject Commit)
+        {
+            var Builder = new StringBuilder();
+            Builder.AppendLine($"tree {Commit.TreeHash}");
+            
+            foreach (var Parent in Commit.ParentHashes)
+            {
+                Builder.AppendLine($"parent {Parent}");
+            }
+
+            Builder.AppendLine($"author {Commit.Author} {Commit.Timestamp:O}");
+            Builder.AppendLine($"committer {Commit.Committer} {Commit.Timestamp:O}");
+            Builder.AppendLine();
+            Builder.AppendLine(Commit.Message);
+
+            return Builder.ToString();
+        }
+
+        // DESERIALIZE COMMIT FROM STRING
+        private CommitObject DeserializeCommit(string Content)
+        {
+            var Commit = new CommitObject();
+            var Lines = Content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var MessageStarted = false;
+            var MessageBuilder = new StringBuilder();
+
+            foreach (var Line in Lines)
+            {
+                if (string.IsNullOrWhiteSpace(Line) && !MessageStarted)
+                {
+                    MessageStarted = true;
+                    continue;
+                }
+
+                if (MessageStarted)
+                {
+                    MessageBuilder.AppendLine(Line);
+                }
+                else if (Line.StartsWith("tree "))
+                {
+                    Commit.TreeHash = Line.Substring(5);
+                }
+                else if (Line.StartsWith("parent "))
+                {
+                    Commit.ParentHashes.Add(Line.Substring(7));
+                }
+                else if (Line.StartsWith("author "))
+                {
+                    var AuthorLine = Line.Substring(7);
+                    var LastSpaceIndex = AuthorLine.LastIndexOf(' ');
+                    if (LastSpaceIndex > 0)
+                    {
+                        Commit.Author = AuthorLine.Substring(0, LastSpaceIndex);
+                        var TimestampStr = AuthorLine.Substring(LastSpaceIndex + 1);
+                        DateTime.TryParse(TimestampStr, out var Timestamp);
+                        Commit.Timestamp = Timestamp;
+                    }
+                    else
+                    {
+                        Commit.Author = AuthorLine;
+                    }
+                }
+                else if (Line.StartsWith("committer "))
+                {
+                    var CommitterLine = Line.Substring(10);
+                    var LastSpaceIndex = CommitterLine.LastIndexOf(' ');
+                    if (LastSpaceIndex > 0)
+                    {
+                        Commit.Committer = CommitterLine.Substring(0, LastSpaceIndex);
+                        var TimestampStr = CommitterLine.Substring(LastSpaceIndex + 1);
+                        DateTime.TryParse(TimestampStr, out var Timestamp);
+                        Commit.Timestamp = Timestamp;
+                    }
+                    else
+                    {
+                        Commit.Committer = CommitterLine;
+                    }
+                }
+            }
+
+            Commit.Message = MessageBuilder.ToString().TrimEnd();
+            return Commit;
+        }
+
+        // COMPRESS DATA USING GZIP
+        private byte[] CompressData(byte[] Data)
+        {
+            using (var OutputStream = new MemoryStream())
+            {
+                using (var GzipStream = new System.IO.Compression.GZipStream(OutputStream, System.IO.Compression.CompressionMode.Compress))
+                {
+                    GzipStream.Write(Data, 0, Data.Length);
+                }
+                return OutputStream.ToArray();
+            }
+        }
+
+        // DECOMPRESS DATA USING GZIP
+        private byte[] DecompressData(byte[] CompressedData)
+        {
+            using (var InputStream = new MemoryStream(CompressedData))
+            using (var GzipStream = new System.IO.Compression.GZipStream(InputStream, System.IO.Compression.CompressionMode.Decompress))
+            using (var OutputStream = new MemoryStream())
+            {
+                GzipStream.CopyTo(OutputStream);
+                return OutputStream.ToArray();
+            }
+        }
+
+        // GET ALL OBJECTS (FOR GARBAGE COLLECTION)
+        public List<string> GetAllObjectHashes()
+        {
+            var Hashes = new List<string>();
+            
+            if (!Directory.Exists(ObjectsPath))
+                return Hashes;
+
+            foreach (var SubDir in Directory.GetDirectories(ObjectsPath))
+            {
+                var Prefix = Path.GetFileName(SubDir);
+                foreach (var File in Directory.GetFiles(SubDir))
+                {
+                    var Suffix = Path.GetFileName(File);
+                    Hashes.Add(Prefix + Suffix);
+                }
+            }
+
+            return Hashes;
+        }
+    }
+}

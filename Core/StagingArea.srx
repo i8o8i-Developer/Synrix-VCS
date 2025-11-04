@@ -1,0 +1,508 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// STAGINGAREA.SRX - INDEX AND STAGING MANAGEMENT
+// HANDLES FILE STAGING, UNSTAGING, AND INDEX OPERATIONS
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace Synrix.Core
+{
+    // INDEX ENTRY REPRESENTS A STAGED FILE
+    public class IndexEntry
+    {
+        public string FilePath { get; set; }
+        public string Hash { get; set; }
+        public long FileSize { get; set; }
+        public DateTime ModifiedTime { get; set; }
+        public string Mode { get; set; }          // FILE PERMISSIONS
+        public int Stage { get; set; }            // MERGE STAGE (0 = NORMAL, 1-3 = CONFLICT)
+
+        public IndexEntry()
+        {
+            Mode = "100644";  // DEFAULT FILE MODE
+            Stage = 0;
+        }
+    }
+
+    // INDEX FILE STRUCTURE
+    public class IndexFile
+    {
+        public int Version { get; set; }
+        public Dictionary<string, IndexEntry> Entries { get; set; }
+        public DateTime LastModified { get; set; }
+
+        public IndexFile()
+        {
+            Version = 1;
+            Entries = new Dictionary<string, IndexEntry>();
+            LastModified = DateTime.Now;
+        }
+    }
+
+    // STAGING AREA MANAGER
+    public class StagingArea
+    {
+        private readonly string RepositoryPath;
+        private readonly string IndexPath;
+        private readonly ObjectStorage Storage;
+
+        public StagingArea(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            IndexPath = Path.Combine(RepositoryPath, ".synrix", "index");
+            Storage = new ObjectStorage(RepositoryPath);
+        }
+
+        // ADD FILE TO STAGING AREA
+        public void AddFile(string FilePath)
+        {
+            var FullPath = Path.Combine(RepositoryPath, FilePath);
+
+            if (!File.Exists(FullPath))
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND: {FilePath}");
+            }
+
+            // READ FILE CONTENT
+            var FileContent = File.ReadAllBytes(FullPath);
+
+            // STORE AS BLOB IN OBJECT DATABASE
+            var Hash = Storage.StoreBlob(FileContent);
+
+            // GET FILE INFO
+            var FileInfo = new FileInfo(FullPath);
+
+            // CREATE INDEX ENTRY
+            var Entry = new IndexEntry
+            {
+                FilePath = NormalizePath(FilePath),
+                Hash = Hash,
+                FileSize = FileInfo.Length,
+                ModifiedTime = FileInfo.LastWriteTime,
+                Mode = GetFileMode(FullPath),
+                Stage = 0
+            };
+
+            // UPDATE INDEX
+            var Index = LoadIndex();
+            Index.Entries[Entry.FilePath] = Entry;
+            Index.LastModified = DateTime.Now;
+            SaveIndex(Index);
+
+            Console.WriteLine($"ADDED: {Entry.FilePath}");
+        }
+
+        // ADD MULTIPLE FILES
+        public void AddFiles(List<string> FilePaths)
+        {
+            foreach (var FilePath in FilePaths)
+            {
+                try
+                {
+                    AddFile(FilePath);
+                }
+                catch (Exception Ex)
+                {
+                    Console.WriteLine($"ERROR ADDING {FilePath}: {Ex.Message}");
+                }
+            }
+        }
+
+        // ADD ALL MODIFIED FILES
+        public void AddAll()
+        {
+            var RepoManager = new RepositoryManager(RepositoryPath);
+            var Status = RepoManager.GetStatus();
+
+            // ADD MODIFIED FILES
+            foreach (var File in Status.ModifiedFiles)
+            {
+                AddFile(File);
+            }
+
+            // ADD UNTRACKED FILES
+            foreach (var File in Status.UntrackedFiles)
+            {
+                AddFile(File);
+            }
+
+            // REMOVE DELETED FILES FROM INDEX
+            foreach (var File in Status.DeletedFiles)
+            {
+                RemoveFile(File);
+            }
+        }
+
+        // REMOVE FILE FROM STAGING AREA
+        public void RemoveFile(string FilePath)
+        {
+            var NormalizedPath = NormalizePath(FilePath);
+            var Index = LoadIndex();
+
+            if (Index.Entries.ContainsKey(NormalizedPath))
+            {
+                Index.Entries.Remove(NormalizedPath);
+                Index.LastModified = DateTime.Now;
+                SaveIndex(Index);
+                Console.WriteLine($"REMOVED FROM INDEX: {NormalizedPath}");
+            }
+            else
+            {
+                Console.WriteLine($"FILE NOT IN INDEX: {NormalizedPath}");
+            }
+        }
+
+        // UNSTAGE FILE (RESET TO HEAD)
+        public void UnstageFile(string FilePath)
+        {
+            var NormalizedPath = NormalizePath(FilePath);
+            var Index = LoadIndex();
+
+            if (!Index.Entries.ContainsKey(NormalizedPath))
+            {
+                Console.WriteLine($"FILE NOT STAGED: {NormalizedPath}");
+                return;
+            }
+
+            // GET HEAD COMMIT
+            var RepoManager = new RepositoryManager(RepositoryPath);
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                // NO COMMITS YET, JUST REMOVE FROM INDEX
+                RemoveFile(FilePath);
+            }
+            else
+            {
+                // RESTORE FILE STATE FROM HEAD COMMIT
+                var CommitManager = new CommitManager(RepositoryPath);
+                var CommitObj = Storage.GetCommit(CurrentCommit);
+                var Tree = Storage.GetTree(CommitObj.TreeHash);
+
+                var FileEntry = FindFileInTree(Tree, NormalizedPath);
+                
+                if (FileEntry != null)
+                {
+                    // RESTORE TO HEAD VERSION
+                    Index.Entries[NormalizedPath] = new IndexEntry
+                    {
+                        FilePath = NormalizedPath,
+                        Hash = FileEntry.Hash,
+                        Mode = FileEntry.Mode,
+                        Stage = 0
+                    };
+                }
+                else
+                {
+                    // FILE DOESN'T EXIST IN HEAD, REMOVE FROM INDEX
+                    Index.Entries.Remove(NormalizedPath);
+                }
+
+                Index.LastModified = DateTime.Now;
+                SaveIndex(Index);
+            }
+
+            Console.WriteLine($"UNSTAGED: {NormalizedPath}");
+        }
+
+        // CLEAR ENTIRE STAGING AREA
+        public void Clear()
+        {
+            var Index = new IndexFile();
+            SaveIndex(Index);
+            Console.WriteLine("STAGING AREA CLEARED");
+        }
+
+        // GET ALL STAGED FILES
+        public Dictionary<string, string> GetAllEntries()
+        {
+            var Index = LoadIndex();
+            return Index.Entries.ToDictionary(e => e.Key, e => e.Value.Hash);
+        }
+
+        // GET STAGING AREA STATUS
+        public List<IndexEntry> GetStagedFiles()
+        {
+            var Index = LoadIndex();
+            return Index.Entries.Values.ToList();
+        }
+
+        // CHECK IF FILE IS STAGED
+        public bool IsFileStaged(string FilePath)
+        {
+            var NormalizedPath = NormalizePath(FilePath);
+            var Index = LoadIndex();
+            return Index.Entries.ContainsKey(NormalizedPath);
+        }
+
+        // GET FILE HASH FROM INDEX
+        public string GetFileHash(string FilePath)
+        {
+            var NormalizedPath = NormalizePath(FilePath);
+            var Index = LoadIndex();
+            
+            if (Index.Entries.ContainsKey(NormalizedPath))
+            {
+                return Index.Entries[NormalizedPath].Hash;
+            }
+
+            return null;
+        }
+
+        // CREATE TREE OBJECT FROM STAGING AREA
+        public string CreateTree()
+        {
+            var Index = LoadIndex();
+            
+            if (Index.Entries.Count == 0)
+            {
+                throw new InvalidOperationException("NOTHING TO COMMIT (STAGING AREA IS EMPTY)");
+            }
+
+            // BUILD TREE STRUCTURE
+            var RootTree = BuildTreeStructure(Index.Entries.Values.ToList());
+            
+            return RootTree;
+        }
+
+        // BUILD TREE STRUCTURE RECURSIVELY
+        private string BuildTreeStructure(List<IndexEntry> Entries)
+        {
+            // GROUP ENTRIES BY DIRECTORY
+            var TreeEntries = new List<TreeEntry>();
+            var Directories = new Dictionary<string, List<IndexEntry>>();
+
+            foreach (var Entry in Entries)
+            {
+                var Parts = Entry.FilePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+                
+                if (Parts.Length == 1)
+                {
+                    // FILE IN ROOT
+                    TreeEntries.Add(new TreeEntry
+                    {
+                        Mode = Entry.Mode,
+                        Type = "blob",
+                        Hash = Entry.Hash,
+                        Name = Parts[0]
+                    });
+                }
+                else
+                {
+                    // FILE IN SUBDIRECTORY
+                    var DirName = Parts[0];
+                    var RemainingPath = string.Join("/", Parts.Skip(1));
+
+                    if (!Directories.ContainsKey(DirName))
+                    {
+                        Directories[DirName] = new List<IndexEntry>();
+                    }
+
+                    Directories[DirName].Add(new IndexEntry
+                    {
+                        FilePath = RemainingPath,
+                        Hash = Entry.Hash,
+                        Mode = Entry.Mode,
+                        FileSize = Entry.FileSize,
+                        ModifiedTime = Entry.ModifiedTime,
+                        Stage = Entry.Stage
+                    });
+                }
+            }
+
+            // CREATE TREE OBJECTS FOR SUBDIRECTORIES
+            foreach (var Dir in Directories)
+            {
+                var SubTreeHash = BuildTreeStructure(Dir.Value);
+                TreeEntries.Add(new TreeEntry
+                {
+                    Mode = "040000",  // DIRECTORY MODE
+                    Type = "tree",
+                    Hash = SubTreeHash,
+                    Name = Dir.Key
+                });
+            }
+
+            // STORE THIS TREE
+            return Storage.StoreTree(TreeEntries);
+        }
+
+        // LOAD INDEX FILE
+        private IndexFile LoadIndex()
+        {
+            if (!File.Exists(IndexPath))
+            {
+                return new IndexFile();
+            }
+
+            try
+            {
+                var JsonContent = File.ReadAllText(IndexPath);
+                return JsonSerializer.Deserialize<IndexFile>(JsonContent);
+            }
+            catch
+            {
+                return new IndexFile();
+            }
+        }
+
+        // SAVE INDEX FILE
+        private void SaveIndex(IndexFile Index)
+        {
+            var JsonOptions = new JsonSerializerOptions { WriteIndented = true };
+            var JsonContent = JsonSerializer.Serialize(Index, JsonOptions);
+            File.WriteAllText(IndexPath, JsonContent);
+        }
+
+        // NORMALIZE FILE PATH
+        private string NormalizePath(string Path)
+        {
+            return Path.Replace('\\', '/').TrimStart('/');
+        }
+
+        // GET FILE MODE (UNIX PERMISSIONS)
+        private string GetFileMode(string FilePath)
+        {
+            var Attributes = File.GetAttributes(FilePath);
+            
+            if ((Attributes & FileAttributes.Directory) == FileAttributes.Directory)
+            {
+                return "040000";  // DIRECTORY
+            }
+
+            // CHECK IF EXECUTABLE (WINDOWS APPROXIMATION)
+            var Extension = Path.GetExtension(FilePath).ToLower();
+            if (Extension == ".exe" || Extension == ".bat" || Extension == ".cmd" || Extension == ".sh")
+            {
+                return "100755";  // EXECUTABLE FILE
+            }
+
+            return "100644";  // REGULAR FILE
+        }
+
+        // FIND FILE IN TREE
+        private TreeEntry FindFileInTree(List<TreeEntry> Tree, string FilePath)
+        {
+            var Parts = FilePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            
+            if (Parts.Length == 0)
+                return null;
+
+            foreach (var Entry in Tree)
+            {
+                if (Entry.Name == Parts[0])
+                {
+                    if (Parts.Length == 1)
+                    {
+                        return Entry;
+                    }
+                    else if (Entry.Type == "tree")
+                    {
+                        var SubTree = Storage.GetTree(Entry.Hash);
+                        var RemainingPath = string.Join("/", Parts.Skip(1));
+                        return FindFileInTree(SubTree, RemainingPath);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        // RESTORE FILES FROM TREE (CHECKOUT)
+        public void RestoreFromTree(string TreeHash)
+        {
+            var Tree = Storage.GetTree(TreeHash);
+            RestoreTreeRecursive(Tree, RepositoryPath);
+        }
+
+        // RESTORE TREE RECURSIVELY
+        private void RestoreTreeRecursive(List<TreeEntry> Tree, string CurrentPath)
+        {
+            foreach (var Entry in Tree)
+            {
+                var EntryPath = Path.Combine(CurrentPath, Entry.Name);
+
+                if (Entry.Type == "blob")
+                {
+                    // RESTORE FILE
+                    var Content = Storage.GetBlob(Entry.Hash);
+                    Directory.CreateDirectory(Path.GetDirectoryName(EntryPath));
+                    File.WriteAllBytes(EntryPath, Content);
+                }
+                else if (Entry.Type == "tree")
+                {
+                    // RESTORE DIRECTORY
+                    Directory.CreateDirectory(EntryPath);
+                    var SubTree = Storage.GetTree(Entry.Hash);
+                    RestoreTreeRecursive(SubTree, EntryPath);
+                }
+            }
+        }
+
+        // UPDATE INDEX FROM TREE (AFTER CHECKOUT)
+        public void UpdateIndexFromTree(string TreeHash)
+        {
+            var Index = new IndexFile();
+            var Tree = Storage.GetTree(TreeHash);
+            UpdateIndexFromTreeRecursive(Tree, "", Index);
+            SaveIndex(Index);
+        }
+
+        // UPDATE INDEX FROM TREE RECURSIVELY
+        private void UpdateIndexFromTreeRecursive(List<TreeEntry> Tree, string Prefix, IndexFile Index)
+        {
+            foreach (var Entry in Tree)
+            {
+                var FilePath = string.IsNullOrEmpty(Prefix) ? Entry.Name : $"{Prefix}/{Entry.Name}";
+
+                if (Entry.Type == "blob")
+                {
+                    Index.Entries[FilePath] = new IndexEntry
+                    {
+                        FilePath = FilePath,
+                        Hash = Entry.Hash,
+                        Mode = Entry.Mode,
+                        Stage = 0
+                    };
+                }
+                else if (Entry.Type == "tree")
+                {
+                    var SubTree = Storage.GetTree(Entry.Hash);
+                    UpdateIndexFromTreeRecursive(SubTree, FilePath, Index);
+                }
+            }
+        }
+
+        // ALIAS FOR AddFile - for compatibility
+        public void StageFile(string filePath)
+        {
+            AddFile(filePath);
+        }
+
+        // CHECK IF THERE ARE UNRESOLVED CONFLICTS
+        public bool HasUnresolvedConflicts()
+        {
+            var index = LoadIndex();
+            return index.Entries.Values.Any(e => e.Stage > 0);
+        }
+
+        // CLEAR ALL CONFLICTS
+        public void ClearConflicts()
+        {
+            var index = LoadIndex();
+            var conflictedFiles = index.Entries.Where(e => e.Value.Stage > 0).ToList();
+            
+            foreach (var entry in conflictedFiles)
+            {
+                index.Entries.Remove(entry.Key);
+            }
+            
+            SaveIndex(index);
+        }
+    }
+}

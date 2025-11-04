@@ -1,0 +1,335 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// DIFFUTIL.SRX - DIFF AND COMPARISON UTILITIES
+// HELPER FUNCTIONS FOR COMPARING FILES AND GENERATING DIFFS
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Utils
+{
+    // DIFF LINE TYPE
+    public enum DiffLineType
+    {
+        Context,    // UNCHANGED LINE
+        Addition,   // LINE ADDED
+        Deletion,   // LINE DELETED
+        Header      // DIFF HEADER
+    }
+
+    // DIFF LINE
+    public class DiffLine
+    {
+        public DiffLineType Type { get; set; }
+        public string Content { get; set; }
+        public int LineNumber { get; set; }
+    }
+
+    // DIFF HUNK
+    public class DiffHunk
+    {
+        public int OldStart { get; set; }
+        public int OldCount { get; set; }
+        public int NewStart { get; set; }
+        public int NewCount { get; set; }
+        public List<DiffLine> Lines { get; set; }
+
+        public DiffHunk()
+        {
+            Lines = new List<DiffLine>();
+        }
+    }
+
+    // FILE DIFF
+    public class FileDiff
+    {
+        public string FilePath { get; set; }
+        public string OldHash { get; set; }
+        public string NewHash { get; set; }
+        public List<DiffHunk> Hunks { get; set; }
+        public bool IsBinary { get; set; }
+        public bool IsNew { get; set; }
+        public bool IsDeleted { get; set; }
+
+        public FileDiff()
+        {
+            Hunks = new List<DiffHunk>();
+        }
+    }
+
+    public static class DiffUtil
+    {
+        // COMPUTE DIFF BETWEEN TWO STRINGS
+        public static List<DiffLine> ComputeDiff(string OldText, string NewText)
+        {
+            var OldLines = SplitLines(OldText);
+            var NewLines = SplitLines(NewText);
+
+            return ComputeLineDiff(OldLines, NewLines);
+        }
+
+        // COMPUTE DIFF BETWEEN TWO LINE ARRAYS
+        public static List<DiffLine> ComputeLineDiff(string[] OldLines, string[] NewLines)
+        {
+            var Diff = new List<DiffLine>();
+            var Lcs = ComputeLcs(OldLines, NewLines);
+
+            int OldIndex = 0;
+            int NewIndex = 0;
+            int LcsIndex = 0;
+
+            while (OldIndex < OldLines.Length || NewIndex < NewLines.Length)
+            {
+                if (LcsIndex < Lcs.Count && OldIndex < OldLines.Length && 
+                    OldLines[OldIndex] == Lcs[LcsIndex])
+                {
+                    // CONTEXT LINE
+                    Diff.Add(new DiffLine
+                    {
+                        Type = DiffLineType.Context,
+                        Content = OldLines[OldIndex],
+                        LineNumber = OldIndex + 1
+                    });
+                    OldIndex++;
+                    NewIndex++;
+                    LcsIndex++;
+                }
+                else if (OldIndex < OldLines.Length && 
+                         (LcsIndex >= Lcs.Count || OldLines[OldIndex] != Lcs[LcsIndex]))
+                {
+                    // DELETION
+                    Diff.Add(new DiffLine
+                    {
+                        Type = DiffLineType.Deletion,
+                        Content = OldLines[OldIndex],
+                        LineNumber = OldIndex + 1
+                    });
+                    OldIndex++;
+                }
+                else if (NewIndex < NewLines.Length)
+                {
+                    // ADDITION
+                    Diff.Add(new DiffLine
+                    {
+                        Type = DiffLineType.Addition,
+                        Content = NewLines[NewIndex],
+                        LineNumber = NewIndex + 1
+                    });
+                    NewIndex++;
+                }
+            }
+
+            return Diff;
+        }
+
+        // COMPUTE LONGEST COMMON SUBSEQUENCE
+        private static List<string> ComputeLcs(string[] Sequence1, string[] Sequence2)
+        {
+            int M = Sequence1.Length;
+            int N = Sequence2.Length;
+            var Dp = new int[M + 1, N + 1];
+
+            // BUILD LCS TABLE
+            for (int I = 1; I <= M; I++)
+            {
+                for (int J = 1; J <= N; J++)
+                {
+                    if (Sequence1[I - 1] == Sequence2[J - 1])
+                    {
+                        Dp[I, J] = Dp[I - 1, J - 1] + 1;
+                    }
+                    else
+                    {
+                        Dp[I, J] = Math.Max(Dp[I - 1, J], Dp[I, J - 1]);
+                    }
+                }
+            }
+
+            // RECONSTRUCT LCS
+            var Lcs = new List<string>();
+            int X = M, Y = N;
+
+            while (X > 0 && Y > 0)
+            {
+                if (Sequence1[X - 1] == Sequence2[Y - 1])
+                {
+                    Lcs.Insert(0, Sequence1[X - 1]);
+                    X--;
+                    Y--;
+                }
+                else if (Dp[X - 1, Y] > Dp[X, Y - 1])
+                {
+                    X--;
+                }
+                else
+                {
+                    Y--;
+                }
+            }
+
+            return Lcs;
+        }
+
+        // SPLIT TEXT INTO LINES
+        private static string[] SplitLines(string Text)
+        {
+            if (string.IsNullOrEmpty(Text))
+            {
+                return new string[0];
+            }
+
+            return Text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+        }
+
+        // FORMAT DIFF AS UNIFIED DIFF
+        public static string FormatUnifiedDiff(FileDiff Diff, int ContextLines = 3)
+        {
+            var Builder = new StringBuilder();
+
+            Builder.AppendLine($"--- a/{Diff.FilePath}");
+            Builder.AppendLine($"+++ b/{Diff.FilePath}");
+
+            foreach (var Hunk in Diff.Hunks)
+            {
+                Builder.AppendLine($"@@ -{Hunk.OldStart},{Hunk.OldCount} +{Hunk.NewStart},{Hunk.NewCount} @@");
+
+                foreach (var Line in Hunk.Lines)
+                {
+                    var Prefix = Line.Type switch
+                    {
+                        DiffLineType.Addition => "+",
+                        DiffLineType.Deletion => "-",
+                        DiffLineType.Context => " ",
+                        _ => ""
+                    };
+
+                    Builder.AppendLine($"{Prefix}{Line.Content}");
+                }
+            }
+
+            return Builder.ToString();
+        }
+
+        // COMPUTE SIMILARITY BETWEEN TWO STRINGS
+        public static double ComputeSimilarity(string Text1, string Text2)
+        {
+            if (string.IsNullOrEmpty(Text1) && string.IsNullOrEmpty(Text2))
+            {
+                return 1.0;
+            }
+
+            if (string.IsNullOrEmpty(Text1) || string.IsNullOrEmpty(Text2))
+            {
+                return 0.0;
+            }
+
+            var Distance = ComputeLevenshteinDistance(Text1, Text2);
+            var MaxLength = Math.Max(Text1.Length, Text2.Length);
+
+            return 1.0 - ((double)Distance / MaxLength);
+        }
+
+        // COMPUTE LEVENSHTEIN DISTANCE
+        private static int ComputeLevenshteinDistance(string String1, string String2)
+        {
+            int M = String1.Length;
+            int N = String2.Length;
+            var Dp = new int[M + 1, N + 1];
+
+            for (int I = 0; I <= M; I++)
+            {
+                Dp[I, 0] = I;
+            }
+
+            for (int J = 0; J <= N; J++)
+            {
+                Dp[0, J] = J;
+            }
+
+            for (int I = 1; I <= M; I++)
+            {
+                for (int J = 1; J <= N; J++)
+                {
+                    int Cost = String1[I - 1] == String2[J - 1] ? 0 : 1;
+                    Dp[I, J] = Math.Min(
+                        Math.Min(Dp[I - 1, J] + 1, Dp[I, J - 1] + 1),
+                        Dp[I - 1, J - 1] + Cost
+                    );
+                }
+            }
+
+            return Dp[M, N];
+        }
+
+        // COUNT ADDITIONS AND DELETIONS
+        public static (int Additions, int Deletions) CountChanges(List<DiffLine> Diff)
+        {
+            int Additions = 0;
+            int Deletions = 0;
+
+            foreach (var Line in Diff)
+            {
+                if (Line.Type == DiffLineType.Addition)
+                {
+                    Additions++;
+                }
+                else if (Line.Type == DiffLineType.Deletion)
+                {
+                    Deletions++;
+                }
+            }
+
+            return (Additions, Deletions);
+        }
+
+        // APPLY PATCH TO TEXT
+        public static string ApplyPatch(string OriginalText, List<DiffLine> Diff)
+        {
+            var Lines = SplitLines(OriginalText).ToList();
+            var Result = new List<string>();
+            int OriginalIndex = 0;
+
+            foreach (var DiffLine in Diff)
+            {
+                if (DiffLine.Type == DiffLineType.Context)
+                {
+                    if (OriginalIndex < Lines.Count)
+                    {
+                        Result.Add(Lines[OriginalIndex]);
+                        OriginalIndex++;
+                    }
+                }
+                else if (DiffLine.Type == DiffLineType.Addition)
+                {
+                    Result.Add(DiffLine.Content);
+                }
+                else if (DiffLine.Type == DiffLineType.Deletion)
+                {
+                    OriginalIndex++;
+                }
+            }
+
+            return string.Join(Environment.NewLine, Result);
+        }
+
+        // CHECK IF FILES ARE IDENTICAL
+        public static bool AreFilesIdentical(byte[] File1, byte[] File2)
+        {
+            if (File1.Length != File2.Length)
+            {
+                return false;
+            }
+
+            for (int I = 0; I < File1.Length; I++)
+            {
+                if (File1[I] != File2[I])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+}

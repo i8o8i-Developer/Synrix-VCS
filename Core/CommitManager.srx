@@ -1,0 +1,567 @@
+// SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION
+// COMMITMANAGER.SRX - COMMIT OPERATIONS AND HISTORY
+// HANDLES COMMIT CREATION, HISTORY TRAVERSAL, AND LOG VIEWING
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace Synrix.Core
+{
+    // COMMIT LOG ENTRY
+    public class CommitLogEntry
+    {
+        public string Hash { get; set; }
+        public string TreeHash { get; set; }
+        public List<string> ParentHashes { get; set; }
+        public string Author { get; set; }
+        public string Committer { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Message { get; set; }
+        public string ShortHash => Hash?.Substring(0, Math.Min(7, Hash.Length));
+
+        public CommitLogEntry()
+        {
+            ParentHashes = new List<string>();
+        }
+    }
+
+    // COMMIT MANAGER
+    public class CommitManager
+    {
+        private readonly string RepositoryPath;
+        private readonly ObjectStorage Storage;
+        private readonly RepositoryManager RepoManager;
+        private readonly StagingArea Staging;
+        private readonly string LogsPath;
+
+        public CommitManager(string RepositoryPath)
+        {
+            this.RepositoryPath = RepositoryPath;
+            Storage = new ObjectStorage(RepositoryPath);
+            RepoManager = new RepositoryManager(RepositoryPath);
+            Staging = new StagingArea(RepositoryPath);
+            LogsPath = Path.Combine(RepositoryPath, ".synrix", "logs");
+        }
+
+        // CREATE A NEW COMMIT
+        public string CreateCommit(string Message, string Author = null, string Committer = null)
+        {
+            if (string.IsNullOrWhiteSpace(Message))
+            {
+                throw new ArgumentException("COMMIT MESSAGE CANNOT BE EMPTY");
+            }
+
+            // GET AUTHOR AND COMMITTER FROM CONFIG IF NOT PROVIDED
+            var Config = RepoManager.LoadConfig();
+            
+            if (string.IsNullOrEmpty(Author))
+            {
+                Author = $"{Config.UserName ?? "Unknown"} <{Config.UserEmail ?? "unknown@synrix.local"}>";
+            }
+
+            if (string.IsNullOrEmpty(Committer))
+            {
+                Committer = Author;
+            }
+
+            // CREATE TREE FROM STAGING AREA
+            string TreeHash;
+            try
+            {
+                TreeHash = Staging.CreateTree();
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException("NOTHING TO COMMIT (STAGING AREA IS EMPTY)");
+            }
+
+            // GET PARENT COMMIT
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            var ParentHashes = new List<string>();
+            
+            if (!string.IsNullOrEmpty(CurrentCommit))
+            {
+                ParentHashes.Add(CurrentCommit);
+            }
+
+            // CHECK IF THERE ARE CHANGES
+            if (!string.IsNullOrEmpty(CurrentCommit))
+            {
+                var ParentCommit = Storage.GetCommit(CurrentCommit);
+                if (ParentCommit.TreeHash == TreeHash)
+                {
+                    throw new InvalidOperationException("NO CHANGES TO COMMIT");
+                }
+            }
+
+            // CREATE COMMIT OBJECT
+            var CommitObj = new CommitObject
+            {
+                TreeHash = TreeHash,
+                ParentHashes = ParentHashes,
+                Author = Author,
+                Committer = Committer,
+                Timestamp = DateTime.Now,
+                Message = Message
+            };
+
+            // STORE COMMIT
+            var CommitHash = Storage.StoreCommit(CommitObj);
+
+            // UPDATE BRANCH REFERENCE
+            UpdateBranchRef(CommitHash);
+
+            // LOG COMMIT
+            LogCommit(CommitHash, CommitObj);
+
+            Console.WriteLine($"[{RepoManager.GetCurrentBranch()} {CommitHash.Substring(0, 7)}] {Message}");
+
+            return CommitHash;
+        }
+
+        // CREATE COMMIT WITH MERGE PARENTS
+        public string CreateMergeCommit(string Message, List<string> ParentHashes, string Author = null)
+        {
+            if (string.IsNullOrWhiteSpace(Message))
+            {
+                throw new ArgumentException("COMMIT MESSAGE CANNOT BE EMPTY");
+            }
+
+            var Config = RepoManager.LoadConfig();
+            
+            if (string.IsNullOrEmpty(Author))
+            {
+                Author = $"{Config.UserName ?? "Unknown"} <{Config.UserEmail ?? "unknown@synrix.local"}>";
+            }
+
+            // CREATE TREE FROM STAGING AREA
+            var TreeHash = Staging.CreateTree();
+
+            // CREATE MERGE COMMIT
+            var CommitObj = new CommitObject
+            {
+                TreeHash = TreeHash,
+                ParentHashes = ParentHashes,
+                Author = Author,
+                Committer = Author,
+                Timestamp = DateTime.Now,
+                Message = Message
+            };
+
+            // STORE COMMIT
+            var CommitHash = Storage.StoreCommit(CommitObj);
+
+            // UPDATE BRANCH REFERENCE
+            UpdateBranchRef(CommitHash);
+
+            // LOG COMMIT
+            LogCommit(CommitHash, CommitObj);
+
+            Console.WriteLine($"[{RepoManager.GetCurrentBranch()} {CommitHash.Substring(0, 7)}] {Message}");
+
+            return CommitHash;
+        }
+
+        // UPDATE BRANCH REFERENCE TO NEW COMMIT
+        private void UpdateBranchRef(string CommitHash)
+        {
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            
+            if (CurrentBranch == "DETACHED HEAD")
+            {
+                throw new InvalidOperationException("CANNOT COMMIT IN DETACHED HEAD STATE");
+            }
+
+            var BranchPath = Path.Combine(RepositoryPath, ".synrix", "refs", "heads", CurrentBranch);
+            Directory.CreateDirectory(Path.GetDirectoryName(BranchPath));
+            File.WriteAllText(BranchPath, CommitHash);
+
+            // UPDATE HEAD
+            RepoManager.UpdateHead($"refs/heads/{CurrentBranch}", true);
+        }
+
+        // LOG COMMIT TO REFLOG
+        private void LogCommit(string CommitHash, CommitObject Commit)
+        {
+            Directory.CreateDirectory(LogsPath);
+            
+            var CurrentBranch = RepoManager.GetCurrentBranch();
+            var LogFile = Path.Combine(LogsPath, $"{CurrentBranch}.log");
+
+            var LogEntry = $"{DateTime.Now:O}|{CommitHash}|{Commit.Author}|{Commit.Message.Split('\n')[0]}";
+            File.AppendAllText(LogFile, LogEntry + Environment.NewLine);
+        }
+
+        // GET COMMIT HISTORY
+        public List<CommitLogEntry> GetHistory(string StartCommitHash = null, int MaxCount = 0)
+        {
+            var History = new List<CommitLogEntry>();
+            var Visited = new HashSet<string>();
+
+            if (string.IsNullOrEmpty(StartCommitHash))
+            {
+                StartCommitHash = RepoManager.GetCurrentCommit();
+            }
+
+            if (string.IsNullOrEmpty(StartCommitHash))
+            {
+                return History;
+            }
+
+            var Queue = new Queue<string>();
+            Queue.Enqueue(StartCommitHash);
+
+            while (Queue.Count > 0 && (MaxCount == 0 || History.Count < MaxCount))
+            {
+                var CommitHash = Queue.Dequeue();
+
+                if (Visited.Contains(CommitHash))
+                {
+                    continue;
+                }
+
+                Visited.Add(CommitHash);
+
+                try
+                {
+                    var CommitObj = Storage.GetCommit(CommitHash);
+                    
+                    var LogEntry = new CommitLogEntry
+                    {
+                        Hash = CommitHash,
+                        TreeHash = CommitObj.TreeHash,
+                        ParentHashes = CommitObj.ParentHashes,
+                        Author = CommitObj.Author,
+                        Committer = CommitObj.Committer,
+                        Timestamp = CommitObj.Timestamp,
+                        Message = CommitObj.Message
+                    };
+
+                    History.Add(LogEntry);
+
+                    // ADD PARENTS TO QUEUE
+                    foreach (var Parent in CommitObj.ParentHashes)
+                    {
+                        if (!Visited.Contains(Parent))
+                        {
+                            Queue.Enqueue(Parent);
+                        }
+                    }
+                }
+                catch (Exception Ex)
+                {
+                    Console.WriteLine($"WARNING: COULD NOT LOAD COMMIT {CommitHash}: {Ex.Message}");
+                }
+            }
+
+            return History;
+        }
+
+        // GET COMMIT BY HASH OR REFERENCE
+        public CommitLogEntry GetCommit(string Reference)
+        {
+            var CommitHash = ResolveReference(Reference);
+            
+            if (string.IsNullOrEmpty(CommitHash))
+            {
+                throw new ArgumentException($"INVALID REFERENCE: {Reference}");
+            }
+
+            var CommitObj = Storage.GetCommit(CommitHash);
+            
+            return new CommitLogEntry
+            {
+                Hash = CommitHash,
+                TreeHash = CommitObj.TreeHash,
+                ParentHashes = CommitObj.ParentHashes,
+                Author = CommitObj.Author,
+                Committer = CommitObj.Committer,
+                Timestamp = CommitObj.Timestamp,
+                Message = CommitObj.Message
+            };
+        }
+
+        // RESOLVE REFERENCE TO COMMIT HASH
+        public string ResolveReference(string Reference)
+        {
+            if (string.IsNullOrEmpty(Reference))
+            {
+                return RepoManager.GetCurrentCommit();
+            }
+
+            // CHECK IF IT'S A FULL HASH
+            if (Reference.Length == 64 && Storage.ObjectExists(Reference))
+            {
+                return Reference;
+            }
+
+            // CHECK IF IT'S A SHORT HASH
+            if (Reference.Length >= 4 && Reference.Length < 64)
+            {
+                var AllHashes = Storage.GetAllObjectHashes();
+                var Matches = AllHashes.Where(h => h.StartsWith(Reference.ToLower())).ToList();
+                
+                if (Matches.Count == 1)
+                {
+                    return Matches[0];
+                }
+                else if (Matches.Count > 1)
+                {
+                    throw new ArgumentException($"AMBIGUOUS SHORT HASH: {Reference}");
+                }
+            }
+
+            // CHECK IF IT'S A BRANCH NAME
+            var BranchPath = Path.Combine(RepositoryPath, ".synrix", "refs", "heads", Reference);
+            if (File.Exists(BranchPath))
+            {
+                return File.ReadAllText(BranchPath).Trim();
+            }
+
+            // CHECK IF IT'S A TAG
+            var TagPath = Path.Combine(RepositoryPath, ".synrix", "refs", "tags", Reference);
+            if (File.Exists(TagPath))
+            {
+                return File.ReadAllText(TagPath).Trim();
+            }
+
+            // CHECK SPECIAL REFERENCES
+            if (Reference == "HEAD")
+            {
+                return RepoManager.GetCurrentCommit();
+            }
+
+            // CHECK RELATIVE REFERENCES (HEAD~1, HEAD~2, ETC.)
+            if (Reference.Contains("~"))
+            {
+                var Parts = Reference.Split('~');
+                var BaseRef = Parts[0];
+                var Steps = int.Parse(Parts[1]);
+
+                var CurrentHash = ResolveReference(BaseRef);
+                
+                for (int I = 0; I < Steps; I++)
+                {
+                    var Commit = Storage.GetCommit(CurrentHash);
+                    if (Commit.ParentHashes.Count == 0)
+                    {
+                        throw new ArgumentException($"REFERENCE {Reference} HAS NO PARENT");
+                    }
+                    CurrentHash = Commit.ParentHashes[0];
+                }
+
+                return CurrentHash;
+            }
+
+            return null;
+        }
+
+        // DISPLAY COMMIT LOG
+        public void ShowLog(int MaxCount = 0, bool OneLineFormat = false)
+        {
+            var History = GetHistory(null, MaxCount);
+
+            if (History.Count == 0)
+            {
+                Console.WriteLine("NO COMMITS YET");
+                return;
+            }
+
+            foreach (var Entry in History)
+            {
+                if (OneLineFormat)
+                {
+                    Console.WriteLine($"{Entry.ShortHash} {Entry.Message.Split('\n')[0]}");
+                }
+                else
+                {
+                    Console.WriteLine($"COMMIT {Entry.Hash}");
+                    Console.WriteLine($"AUTHOR: {Entry.Author}");
+                    Console.WriteLine($"DATE:   {Entry.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                    Console.WriteLine();
+                    Console.WriteLine($"    {Entry.Message}");
+                    Console.WriteLine();
+                }
+            }
+        }
+
+        // SHOW COMMIT DETAILS
+        public void ShowCommit(string Reference)
+        {
+            var Commit = GetCommit(Reference);
+
+            Console.WriteLine($"COMMIT {Commit.Hash}");
+            
+            if (Commit.ParentHashes.Count > 0)
+            {
+                Console.WriteLine($"PARENT: {string.Join(", ", Commit.ParentHashes.Select(h => h.Substring(0, 7)))}");
+            }
+
+            Console.WriteLine($"TREE:   {Commit.TreeHash.Substring(0, 7)}");
+            Console.WriteLine($"AUTHOR: {Commit.Author}");
+            Console.WriteLine($"DATE:   {Commit.Timestamp:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine();
+            Console.WriteLine($"    {Commit.Message}");
+            Console.WriteLine();
+        }
+
+        // GET COMMIT TREE
+        public List<TreeEntry> GetCommitTree(string Reference)
+        {
+            var CommitHash = ResolveReference(Reference);
+            var CommitObj = Storage.GetCommit(CommitHash);
+            return Storage.GetTree(CommitObj.TreeHash);
+        }
+
+        // GET FILE FROM COMMIT
+        public byte[] GetFileFromCommit(string Reference, string FilePath)
+        {
+            var CommitHash = ResolveReference(Reference);
+            var CommitObj = Storage.GetCommit(CommitHash);
+            var Tree = Storage.GetTree(CommitObj.TreeHash);
+
+            var FileEntry = FindFileInTree(Tree, FilePath);
+            
+            if (FileEntry == null)
+            {
+                throw new FileNotFoundException($"FILE NOT FOUND IN COMMIT: {FilePath}");
+            }
+
+            return Storage.GetBlob(FileEntry.Hash);
+        }
+
+        // FIND FILE IN TREE
+        private TreeEntry FindFileInTree(List<TreeEntry> Tree, string FilePath)
+        {
+            var Parts = FilePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            
+            foreach (var Entry in Tree)
+            {
+                if (Entry.Name == Parts[0])
+                {
+                    if (Parts.Length == 1)
+                    {
+                        return Entry;
+                    }
+                    else if (Entry.Type == "tree")
+                    {
+                        var SubTree = Storage.GetTree(Entry.Hash);
+                        var RemainingPath = string.Join("/", Parts.Skip(1));
+                        return FindFileInTree(SubTree, RemainingPath);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        // GET DIFFERENCES BETWEEN TWO COMMITS
+        public Dictionary<string, string> GetDifferences(string Commit1, string Commit2)
+        {
+            var Differences = new Dictionary<string, string>();
+
+            var Tree1 = GetCommitTree(Commit1);
+            var Tree2 = GetCommitTree(Commit2);
+
+            var Files1 = GetAllFilesInTree(Tree1);
+            var Files2 = GetAllFilesInTree(Tree2);
+
+            // FIND ADDED AND MODIFIED FILES
+            foreach (var File in Files2)
+            {
+                if (!Files1.ContainsKey(File.Key))
+                {
+                    Differences[File.Key] = "ADDED";
+                }
+                else if (Files1[File.Key] != File.Value)
+                {
+                    Differences[File.Key] = "MODIFIED";
+                }
+            }
+
+            // FIND DELETED FILES
+            foreach (var File in Files1)
+            {
+                if (!Files2.ContainsKey(File.Key))
+                {
+                    Differences[File.Key] = "DELETED";
+                }
+            }
+
+            return Differences;
+        }
+
+        // GET ALL FILES IN TREE
+        private Dictionary<string, string> GetAllFilesInTree(List<TreeEntry> Tree, string Prefix = "")
+        {
+            var Files = new Dictionary<string, string>();
+
+            foreach (var Entry in Tree)
+            {
+                var FilePath = string.IsNullOrEmpty(Prefix) ? Entry.Name : $"{Prefix}/{Entry.Name}";
+
+                if (Entry.Type == "blob")
+                {
+                    Files[FilePath] = Entry.Hash;
+                }
+                else if (Entry.Type == "tree")
+                {
+                    var SubTree = Storage.GetTree(Entry.Hash);
+                    var SubFiles = GetAllFilesInTree(SubTree, FilePath);
+                    
+                    foreach (var SubFile in SubFiles)
+                    {
+                        Files[SubFile.Key] = SubFile.Value;
+                    }
+                }
+            }
+
+            return Files;
+        }
+
+        // AMEND LAST COMMIT
+        public string AmendCommit(string NewMessage = null)
+        {
+            var CurrentCommit = RepoManager.GetCurrentCommit();
+            
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                throw new InvalidOperationException("NO COMMIT TO AMEND");
+            }
+
+            var CommitObj = Storage.GetCommit(CurrentCommit);
+
+            // USE NEW MESSAGE OR KEEP OLD ONE
+            if (string.IsNullOrEmpty(NewMessage))
+            {
+                NewMessage = CommitObj.Message;
+            }
+
+            // CREATE NEW TREE FROM STAGING AREA
+            var TreeHash = Staging.CreateTree();
+
+            // CREATE NEW COMMIT WITH SAME PARENTS
+            var NewCommitObj = new CommitObject
+            {
+                TreeHash = TreeHash,
+                ParentHashes = CommitObj.ParentHashes,
+                Author = CommitObj.Author,
+                Committer = $"{RepoManager.LoadConfig().UserName ?? "Unknown"} <{RepoManager.LoadConfig().UserEmail ?? "unknown@synrix.local"}>",
+                Timestamp = DateTime.Now,
+                Message = NewMessage
+            };
+
+            var NewCommitHash = Storage.StoreCommit(NewCommitObj);
+
+            // UPDATE BRANCH REFERENCE
+            UpdateBranchRef(NewCommitHash);
+
+            Console.WriteLine($"[{RepoManager.GetCurrentBranch()} {NewCommitHash.Substring(0, 7)}] {NewMessage} (AMENDED)");
+
+            return NewCommitHash;
+        }
+    }
+}

@@ -17,7 +17,7 @@
 [![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?style=for-the-badge&logo=dotnet)](https://dotnet.microsoft.com/)
 [![Build Status](https://img.shields.io/badge/Build-Passing-success?style=for-the-badge)](https://github.com/i8o8i-Developer/Synrix-VCS)
 
-*A Next-Generation Version Control System Built For Simplicity, Safety, And Speed*
+*A Next-Generation Version Control System Built For Simplicity, Safety, And Speed !!*
 
 [Features](#) • [Installation](#) • [Quick Start](#) • [Documentation](#) • [Contributing](#)
 

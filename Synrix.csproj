@@ -12,6 +12,9 @@
     <Description>FULLY FUNCTIONAL VERSION CONTROL SYSTEM LIKE GIT</Description>
     <Copyright>COPYRIGHT (C) 2025 SYNRIX PROJECT</Copyright>
     <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>synrix</ToolCommandName>
+    <PackageOutputPath>./nupkg</PackageOutputPath>
   </PropertyGroup>
 
   <ItemGroup>

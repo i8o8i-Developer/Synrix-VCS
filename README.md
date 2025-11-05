@@ -252,19 +252,6 @@ synrix tag v1.0.0 -m "Version 1.0.0 Release"
 
 ---
 
-## 📚 DOCUMENTATION
-
-Comprehensive Documentation Is Available In The [Wiki](https://github.com/i8o8i-Developer/Synrix-VCS/wiki):
-
-- **[Getting Started Guide](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Getting-Started)** - First Steps With SYNRIX
-- **[Command Reference](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Command-Reference)** - Complete Command Documentation
-- **[Architecture Overview](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Architecture)** - Technical Deep Dive
-- **[Migration From Git](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Migration-From-Git)** - Transitioning Guide
-- **[Best Practices](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Best-Practices)** - Recommended Workflows
-- **[Troubleshooting](https://github.com/i8o8i-Developer/Synrix-VCS/wiki/Troubleshooting)** - Common Issues And Solutions
-
----
-
 ## 🤝 CONTRIBUTING
 
 We Welcome Contributions From The Community! SYNRIX Is An Open Source Project And We're Excited To Work With Developers Who Share Our Vision.

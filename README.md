@@ -22,8 +22,12 @@
 [Features](#) • [Installation](#) • [Quick Start](#) • [Documentation](#) • [Contributing](#)
 
 <a href="https://www.producthunt.com/products/synrix-version-control-system-like-git?embed=true&utm_source=badge-featured&utm_medium=badge&utm_source=badge-synrix&#0045;version&#0045;control&#0045;system&#0045;like&#0045;git" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1034659&theme=light&t=1762327379229" alt="Synrix&#0032;&#0058;&#0032;Version&#0032;Control&#0032;System&#0032;Like&#0032;Git - Modern&#0032;Version&#0032;Control&#0032;System&#0032;Built&#0032;For&#0032;Safety&#0032;&#0038;&#0032;Simplicity | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+<a href="https://www.producthunt.com/products/synrix-version-control-system-like-git?utm_source=badge-follow&utm_medium=badge&utm_source=badge-synrix&#0045;version&#0045;control&#0045;system&#0045;like&#0045;git" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/follow.svg?product_id=1124031&theme=dark" alt="Synrix&#0032;&#0058;&#0032;Version&#0032;Control&#0032;System&#0032;Like&#0032;Git - Modern&#0032;Version&#0032;Control&#0032;System&#0032;Built&#0032;For&#0032;Safety&#0032;&#0038;&#0032;Simplicity | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 
-<iframe style="border: none;" src="https://cards.producthunt.com/cards/products/1124031" width="500" height="405" frameborder="0" scrolling="no" allowfullscreen></iframe>
+<a href="https://www.producthunt.com/products/1124031" target="_blank">
+  <img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1124031&theme=light"
+       alt="Featured on Product Hunt" width="250" height="54">
+</a>
 
 </div>
 

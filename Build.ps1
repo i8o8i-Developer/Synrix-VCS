@@ -6,12 +6,23 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSCommandPath
 $OutputRoot = Join-Path $ProjectRoot "Bin"
+$BuildStamp = [Guid]::NewGuid().ToString("N")
 $PayloadDirectory = Join-Path $OutputRoot "payload"
-$CliPublishDirectory = Join-Path $OutputRoot "synrix-publish"
-$InstallerPublishDirectory = Join-Path $OutputRoot "installer-publish"
+$CliPublishDirectory = Join-Path $OutputRoot ("synrix-publish-" + $BuildStamp)
+$InstallerPublishDirectory = Join-Path $OutputRoot ("installer-publish-" + $BuildStamp)
 $CliExecutablePath = Join-Path $OutputRoot "synrix.exe"
 $InstallerExecutablePath = Join-Path $OutputRoot "SynrixInstaller.exe"
 $PayloadPath = Join-Path $PayloadDirectory "synrix.exe"
+
+function Assert-LastExitCode {
+  param(
+    [string]$Action
+  )
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Action Failed With Exit Code $LASTEXITCODE"
+  }
+}
 
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host "  SYNRIX BUILD SCRIPT" -ForegroundColor Cyan
@@ -34,14 +45,6 @@ Write-Host ""
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $PayloadDirectory | Out-Null
 
-if (Test-Path $CliPublishDirectory) {
-  Remove-Item $CliPublishDirectory -Recurse -Force
-}
-
-if (Test-Path $InstallerPublishDirectory) {
-  Remove-Item $InstallerPublishDirectory -Recurse -Force
-}
-
 Write-Host "PUBLISHING SYNRIX CLI..." -ForegroundColor Yellow
 
 dotnet publish (Join-Path $ProjectRoot "Synrix.Publish.csproj") `
@@ -52,6 +55,7 @@ dotnet publish (Join-Path $ProjectRoot "Synrix.Publish.csproj") `
   /p:PublishSingleFile=true `
   /p:EnableCompressionInSingleFile=true `
   /p:IncludeNativeLibrariesForSelfExtract=true
+Assert-LastExitCode "Publishing SYNRIX CLI"
 
 $PublishedCliExecutable = Join-Path $CliPublishDirectory "synrix.exe"
 if (!(Test-Path $PublishedCliExecutable)) {
@@ -71,6 +75,7 @@ dotnet publish (Join-Path $ProjectRoot "Installer\SynrixInstaller.csproj") `
   /p:PublishSingleFile=true `
   /p:EnableCompressionInSingleFile=true `
   /p:SynrixPayloadPath="$PayloadPath"
+Assert-LastExitCode "Publishing Windows installer"
 
 $PublishedInstallerExecutable = Join-Path $InstallerPublishDirectory "SynrixInstaller.exe"
 if (!(Test-Path $PublishedInstallerExecutable)) {
@@ -94,10 +99,12 @@ Write-Host ""
 
 Write-Host "TESTING SYNRIX CLI..." -ForegroundColor Yellow
 & $CliExecutablePath --version
+Assert-LastExitCode "Testing SYNRIX CLI"
 Write-Host ""
 
 Write-Host "TESTING INSTALLER USAGE OUTPUT..." -ForegroundColor Yellow
 & $InstallerExecutablePath --help
+Assert-LastExitCode "Testing Installer Usage Output"
 Write-Host ""
 
 Write-Host "===============================================" -ForegroundColor Cyan

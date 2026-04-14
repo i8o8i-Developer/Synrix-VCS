@@ -164,7 +164,9 @@ cd Synrix-VCS
 .\Bin\SynrixInstaller.exe --force
 ```
 
-The installer places `synrix.exe` under `%LOCALAPPDATA%\Programs\Synrix`, updates the current user's `PATH`, and verifies the installed command by running `synrix --version` from the installed location.
+The Installer Places `synrix.exe` Under `%LOCALAPPDATA%\Programs\Synrix`, Updates The Current User's `PATH`, And Verifies The Installed command by running `synrix --version` from the installed location.
+
+If you previously installed SYNRIX in `C:\Program Files\Synrix`, close and reopen PowerShell after installing the new build. Older shells can keep resolving the stale system-wide executable even after the user install is updated. Use `Get-Command synrix -All` to confirm the active command path.
 
 ### VERIFY INSTALLATION
 
@@ -228,8 +230,8 @@ synrix merge feature-x
 ### REMOTE OPERATIONS
 
 ```bash
-# Add Remote Repository
-synrix remote add origin https://github.com/username/repo.git
+# Add A SynrixForge Remote Repository
+synrix remote add origin https://synrixforge.example.com/username/repository
 
 # Push Changes
 synrix push origin main
@@ -238,8 +240,11 @@ synrix push origin main
 synrix pull origin main
 
 # Clone Repository
-synrix clone https://github.com/username/repo.git
+synrix clone https://synrixforge.example.com/username/repository
+synrix clone https://synrixforge.example.com/username/repository.synrix
 ```
+
+SynrixForge Remote URLs Do Not Require A `.synrix` Suffix. The CLI Accepts Plain Repository Page URLs And Also Tolerates `.git` Or `.synrix` Suffixes When Present.
 
 ### ADVANCED FEATURES
 

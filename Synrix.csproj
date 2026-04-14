@@ -10,7 +10,7 @@
     <Company>SYNRIX</Company>
     <Product>SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION</Product>
     <Description>FULLY FUNCTIONAL VERSION CONTROL SYSTEM LIKE GIT</Description>
-    <Copyright>COPYRIGHT (C) 2025 SYNRIX PROJECT</Copyright>
+    <Copyright>COPYRIGHT (C) 2026 SYNRIX PROJECT</Copyright>
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>synrix</ToolCommandName>

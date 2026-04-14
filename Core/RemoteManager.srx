@@ -772,7 +772,6 @@ namespace Synrix.Core
             {
                 Console.WriteLine($"CLONING {RemoteUrl} INTO {TargetPath}...");
 
-                EnsureCloneTarget(TargetPath);
                 var RemoteType = DetermineRemoteTypeFromUrl(RemoteUrl);
 
                 if (RemoteType == RemoteType.HTTP || RemoteType == RemoteType.HTTPS)
@@ -789,8 +788,8 @@ namespace Synrix.Core
                         ? (string.IsNullOrWhiteSpace(RemoteInfo.DefaultBranch) ? "main" : RemoteInfo.DefaultBranch)
                         : RemoteInfo.Branch.Name;
 
+                    PrepareCloneTarget(TargetPath, InitialBranch, RemoteUrl);
                     var RepoMgr = new RepositoryManager(TargetPath);
-                    RepoMgr.InitializeRepository(InitialBranch);
 
                     var RemoteMgr = new RemoteManager(TargetPath);
                     RemoteMgr.AddRemote("origin", RemoteUrl);
@@ -824,12 +823,9 @@ namespace Synrix.Core
                 }
 
                 // CREATE TARGET DIRECTORY
-                Directory.CreateDirectory(TargetPath);
-
-                // INITIALIZE REPOSITORY
                 var LocalBranch = string.IsNullOrWhiteSpace(Branch) ? "main" : Branch;
+                PrepareCloneTarget(TargetPath, LocalBranch, RemoteUrl);
                 var LocalRepoMgr = new RepositoryManager(TargetPath);
-                LocalRepoMgr.InitializeRepository(LocalBranch);
 
                 // ADD REMOTE
                 var LocalRemoteMgr = new RemoteManager(TargetPath);
@@ -1041,11 +1037,7 @@ namespace Synrix.Core
             }
 
             var Owner = Segments[^2];
-            var Slug = Segments[^1];
-            if (Slug.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
-            {
-                Slug = Slug.Substring(0, Slug.Length - 4);
-            }
+            var Slug = TrimKnownRemoteSuffix(Segments[^1]);
 
             var BaseUrl = $"{ParsedUrl.Scheme}://{ParsedUrl.Authority}";
             var EncodedOwner = Uri.EscapeDataString(Owner);
@@ -1410,19 +1402,165 @@ namespace Synrix.Core
             return $"{ByteCount / (1024.0 * 1024.0):F1} MB";
         }
 
-        private static void EnsureCloneTarget(string TargetPath)
+        private static void PrepareCloneTarget(string TargetPath, string InitialBranch, string RemoteUrl)
         {
-            if (Directory.Exists(TargetPath))
+            Directory.CreateDirectory(TargetPath);
+
+            var RepoMgr = new RepositoryManager(TargetPath);
+            if (RepoMgr.IsRepository())
             {
-                if (Directory.EnumerateFileSystemEntries(TargetPath).Any())
+                if (!CanReuseRepositoryForClone(TargetPath, RepoMgr))
                 {
-                    throw new InvalidOperationException("TARGET DIRECTORY ALREADY EXISTS AND IS NOT EMPTY");
+                    throw new InvalidOperationException(GetCloneConflictMessage(TargetPath, RemoteUrl));
                 }
 
+                ResetCloneableRepositoryState(TargetPath);
+                ConfigureCloneRepository(TargetPath, InitialBranch, RepoMgr);
                 return;
             }
 
-            Directory.CreateDirectory(TargetPath);
+            if (Directory.EnumerateFileSystemEntries(TargetPath).Any())
+            {
+                throw new InvalidOperationException("TARGET DIRECTORY ALREADY EXISTS AND IS NOT EMPTY");
+            }
+
+            RepoMgr.InitializeRepository(InitialBranch);
+        }
+
+        private static string GetCloneConflictMessage(string TargetPath, string RemoteUrl)
+        {
+            try
+            {
+                var ExistingRemoteManager = new RemoteManager(TargetPath);
+                var ExistingOriginUrl = ExistingRemoteManager.GetRemoteUrl("origin");
+
+                if (!string.IsNullOrWhiteSpace(ExistingOriginUrl) &&
+                    string.Equals(
+                        NormalizeRemoteUrlForComparison(ExistingOriginUrl),
+                        NormalizeRemoteUrlForComparison(RemoteUrl),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return "TARGET DIRECTORY ALREADY CONTAINS THIS CLONED REPOSITORY. USE THE EXISTING DIRECTORY OR CHOOSE A DIFFERENT TARGET";
+                }
+            }
+            catch
+            {
+            }
+
+            return "TARGET DIRECTORY ALREADY CONTAINS A SYNRIX REPOSITORY. CHOOSE A DIFFERENT DIRECTORY";
+        }
+
+        private static bool CanReuseRepositoryForClone(string TargetPath, RepositoryManager RepoMgr)
+        {
+            var AllowedTopLevelEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".synrix",
+                ".synrixignore"
+            };
+
+            var TopLevelEntries = Directory.EnumerateFileSystemEntries(TargetPath)
+                .Select(Path.GetFileName)
+                .Where(Name => !string.IsNullOrWhiteSpace(Name))
+                .ToList();
+
+            if (TopLevelEntries.Any(Name => !AllowedTopLevelEntries.Contains(Name)))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(RepoMgr.GetCurrentCommit()))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void ResetCloneableRepositoryState(string TargetPath)
+        {
+            var SynrixRoot = Path.Combine(TargetPath, ".synrix");
+            var ResetDirectories = new[]
+            {
+                Path.Combine(SynrixRoot, "objects"),
+                Path.Combine(SynrixRoot, "refs"),
+                Path.Combine(SynrixRoot, "logs"),
+                Path.Combine(SynrixRoot, "packs"),
+                Path.Combine(SynrixRoot, "remotes")
+            };
+
+            foreach (var DirectoryPath in ResetDirectories)
+            {
+                if (Directory.Exists(DirectoryPath))
+                {
+                    Directory.Delete(DirectoryPath, true);
+                }
+            }
+
+            var IndexPath = Path.Combine(SynrixRoot, "index");
+            if (File.Exists(IndexPath))
+            {
+                File.Delete(IndexPath);
+            }
+
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "objects"));
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "refs", "heads"));
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "refs", "tags"));
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "logs"));
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "hooks"));
+            Directory.CreateDirectory(Path.Combine(SynrixRoot, "info"));
+
+            var DescriptionPath = Path.Combine(SynrixRoot, "info", "description");
+            if (!File.Exists(DescriptionPath))
+            {
+                File.WriteAllText(DescriptionPath, "SYNRIX REPOSITORY - SYNCHRONIZED REPOSITORY INDEXING EXTENSION");
+            }
+        }
+
+        private static void ConfigureCloneRepository(string TargetPath, string InitialBranch, RepositoryManager RepoMgr)
+        {
+            var Config = RepoMgr.LoadConfig();
+            Config.DefaultBranch = InitialBranch;
+            RepoMgr.SaveConfig(Config);
+
+            Directory.CreateDirectory(Path.Combine(TargetPath, ".synrix", "refs", "heads"));
+            File.WriteAllText(Path.Combine(TargetPath, ".synrix", "HEAD"), $"ref: refs/heads/{InitialBranch}");
+        }
+
+        private static string TrimKnownRemoteSuffix(string Name)
+        {
+            if (Name.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            {
+                return Name.Substring(0, Name.Length - 4);
+            }
+
+            if (Name.EndsWith(".synrix", StringComparison.OrdinalIgnoreCase))
+            {
+                return Name.Substring(0, Name.Length - 7);
+            }
+
+            return Name;
+        }
+
+        private static string NormalizeRemoteUrlForComparison(string Url)
+        {
+            if (string.IsNullOrWhiteSpace(Url))
+            {
+                return string.Empty;
+            }
+
+            var RemoteType = DetermineRemoteTypeFromUrl(Url);
+            if (RemoteType == RemoteType.HTTP || RemoteType == RemoteType.HTTPS)
+            {
+                var Descriptor = ParseHttpRemoteDescriptor(Url);
+                return $"{Descriptor.BaseUrl.TrimEnd('/')}/{Descriptor.Owner}/{Descriptor.Slug}";
+            }
+
+            if (RemoteType == RemoteType.Local)
+            {
+                return Path.GetFullPath(Url).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+
+            return Url.Trim().TrimEnd('/');
         }
 
         private static RemoteType DetermineRemoteTypeFromUrl(string Url)

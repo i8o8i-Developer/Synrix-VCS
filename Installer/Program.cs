@@ -52,9 +52,12 @@ internal static class Program
             Console.WriteLine("INSTALLATION COMPLETE");
             Console.WriteLine($"INSTALLED EXECUTABLE: {targetExecutable}");
 
+            ReportConflictingInstalls(targetExecutable);
+
             if (!options.NoPath)
             {
                 Console.WriteLine("NEW TERMINALS CAN RUN: synrix --version");
+                Console.WriteLine("CLOSE AND REOPEN ANY TERMINALS THAT WERE OPEN BEFORE THIS INSTALL.");
             }
 
             return 0;
@@ -213,6 +216,63 @@ internal static class Program
     {
         var normalizedCandidate = NormalizePath(candidate);
         return pathEntries.Any(entry => string.Equals(NormalizePath(entry), normalizedCandidate, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void ReportConflictingInstalls(string targetExecutable)
+    {
+        var conflicts = FindSynrixExecutablesOnPath(targetExecutable);
+        if (conflicts.Count == 0)
+        {
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("WARNING: OTHER SYNRIX EXECUTABLES ARE ALSO AVAILABLE ON PATH:");
+
+        foreach (var conflict in conflicts)
+        {
+            Console.WriteLine($"  {conflict.Path} (FILE VERSION {conflict.Version})");
+        }
+
+        Console.WriteLine("EXISTING SHELLS MAY STILL RESOLVE TO AN OLDER COPY UNTIL THEY ARE RESTARTED.");
+        Console.WriteLine("VERIFY ACTIVE RESOLUTION WITH: Get-Command synrix -All");
+    }
+
+    private static List<(string Path, string Version)> FindSynrixExecutablesOnPath(string targetExecutable)
+    {
+        var results = new List<(string Path, string Version)>();
+        var normalizedTarget = NormalizePath(targetExecutable);
+
+        foreach (var entry in SplitPathEntries(Environment.GetEnvironmentVariable("Path") ?? string.Empty))
+        {
+            var candidate = Path.Combine(entry, InstalledExecutableName);
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            var normalizedCandidate = NormalizePath(candidate);
+            if (string.Equals(normalizedCandidate, normalizedTarget, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            results.Add((candidate, GetFileVersion(candidate)));
+        }
+
+        return results;
+    }
+
+    private static string GetFileVersion(string executablePath)
+    {
+        try
+        {
+            return FileVersionInfo.GetVersionInfo(executablePath).FileVersion ?? "UNKNOWN";
+        }
+        catch
+        {
+            return "UNKNOWN";
+        }
     }
 
     private static void MovePathToFront(List<string> pathEntries, string installDirectory)

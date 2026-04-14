@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using Synrix.Core;
 
 namespace Synrix
@@ -875,7 +876,7 @@ namespace Synrix
             }
 
             string sourceUrl = Args[0];
-            string targetPath = Args.Length > 1 ? Args[1] : Path.GetFileName(sourceUrl.TrimEnd('/'));
+            string targetPath = Args.Length > 1 ? Args[1] : GetDefaultCloneDirectoryName(sourceUrl);
 
             targetPath = Path.GetFullPath(targetPath);
 
@@ -895,6 +896,28 @@ namespace Synrix
                 Console.WriteLine($"✗ Clone Failed");
                 Console.ResetColor();
             }
+        }
+
+        static string GetDefaultCloneDirectoryName(string SourceUrl)
+        {
+            var TrimmedSource = SourceUrl.TrimEnd('/', '\\');
+            var DirectoryName = Path.GetFileName(TrimmedSource);
+
+            if (string.IsNullOrWhiteSpace(DirectoryName))
+            {
+                DirectoryName = TrimmedSource;
+            }
+
+            if (DirectoryName.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            {
+                DirectoryName = DirectoryName.Substring(0, DirectoryName.Length - 4);
+            }
+            else if (DirectoryName.EndsWith(".synrix", StringComparison.OrdinalIgnoreCase))
+            {
+                DirectoryName = DirectoryName.Substring(0, DirectoryName.Length - 7);
+            }
+
+            return string.IsNullOrWhiteSpace(DirectoryName) ? "repository" : DirectoryName;
         }
 
         // ========== REFLOG OPERATIONS ==========
@@ -1419,9 +1442,11 @@ namespace Synrix
         // SHOW HELP
         static void ShowHelp()
         {
+            var DisplayVersion = GetDisplayVersion();
+
             Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
             Console.WriteLine("║  SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION         ║");
-            Console.WriteLine("║  VERSION 2.0.0 - PRODUCTION RELEASE                          ║");
+            Console.WriteLine($"║  VERSION {DisplayVersion.PadRight(12)} - PRODUCTION RELEASE                 ║");
             Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
             Console.WriteLine();
             Console.WriteLine("USAGE: synrix <command> [options]");
@@ -1541,12 +1566,15 @@ namespace Synrix
         // SHOW VERSION
         static void ShowVersion()
         {
+            var DisplayVersion = GetDisplayVersion();
+
             Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
-            Console.WriteLine("║  SYNRIX VERSION 2.0.0 - PRODUCTION RELEASE                   ║");
+            Console.WriteLine($"║  SYNRIX VERSION {DisplayVersion.PadRight(10)} - PRODUCTION RELEASE          ║");
             Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
             Console.WriteLine();
             Console.WriteLine("SYNCHRONIZED REPOSITORY INDEXING EXTENSION");
             Console.WriteLine("COPYRIGHT (C) 2025 SYNRIX PROJECT");
+            Console.WriteLine($"EXECUTABLE: {GetExecutablePath()}");
             Console.WriteLine();
             Console.WriteLine("FEATURES:");
             Console.WriteLine("  • Distributed Version Control System");
@@ -1562,6 +1590,24 @@ namespace Synrix
             Console.WriteLine();
             Console.WriteLine("LICENSE: MIT");
             Console.WriteLine("REPOSITORY: https://github.com/synrix/synrix");
+        }
+
+        static string GetDisplayVersion()
+        {
+            var AssemblyVersion = Assembly.GetExecutingAssembly().GetName().Version;
+            if (AssemblyVersion == null)
+            {
+                return "UNKNOWN";
+            }
+
+            return AssemblyVersion.Build > 0
+                ? AssemblyVersion.ToString(4)
+                : AssemblyVersion.ToString(3);
+        }
+
+        static string GetExecutablePath()
+        {
+            return Environment.ProcessPath ?? "UNKNOWN";
         }
     }
 }

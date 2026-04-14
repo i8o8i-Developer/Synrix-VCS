@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>SynrixInstaller</AssemblyName>
+    <RootNamespace>Synrix.Installer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <SynrixPayloadPath Condition="'$(SynrixPayloadPath)' == ''">$(MSBuildProjectDirectory)\..\Bin\payload\synrix.exe</SynrixPayloadPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(SynrixPayloadPath)" LogicalName="Synrix.Payload.synrix.exe" />
+  </ItemGroup>
+
+  <Target Name="EnsurePayloadExists" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(SynrixPayloadPath)')" Text="Synrix Payload Not Found At $(SynrixPayloadPath). Run Build.ps1 First." />
+  </Target>
+
+</Project>

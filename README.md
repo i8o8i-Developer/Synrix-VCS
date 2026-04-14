@@ -147,10 +147,24 @@ cd Synrix-VCS
 .\Build.ps1                   # Windows PowerShell
 ./Build.sh                    # Linux/MacOS Bash
 
-# Add To PATH
-# Windows: Add Bin\ Directory To System PATH
-# Linux/MacOS: Add Bin/ Directory To ~/.bashrc Or ~/.zshrc
+# Windows Installer Output
+# Produces Bin\synrix.exe And Bin\SynrixInstaller.exe
 ```
+
+### WINDOWS INSTALLER
+
+```powershell
+# Build shipping binaries
+.\Build.ps1
+
+# Install for the current user
+.\Bin\SynrixInstaller.exe
+
+# Overwrite an existing install
+.\Bin\SynrixInstaller.exe --force
+```
+
+The installer places `synrix.exe` under `%LOCALAPPDATA%\Programs\Synrix`, updates the current user's `PATH`, and verifies the installed command by running `synrix --version` from the installed location.
 
 ### VERIFY INSTALLATION
 

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Synrix</RootNamespace>
+    <AssemblyName>synrix</AssemblyName>
+    <Version>2.0.0</Version>
+    <Authors>SYNRIX PROJECT</Authors>
+    <Company>SYNRIX</Company>
+    <Product>SYNRIX - SYNCHRONIZED REPOSITORY INDEXING EXTENSION</Product>
+    <Description>WINDOWS PUBLISH PROJECT FOR THE SYNRIX CLI</Description>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Synrix.srx" />
+    <Compile Include="Core\*.srx" />
+    <Compile Include="Utils\*.srx" />
+  </ItemGroup>
+
+</Project>

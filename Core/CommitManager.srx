@@ -321,6 +321,19 @@ namespace Synrix.Core
                 return File.ReadAllText(BranchPath).Trim();
             }
 
+            // CHECK IF IT'S A REMOTE-TRACKING BRANCH (origin/main, upstream/feature, ETC.)
+            var RemoteBranchPath = Path.Combine(
+                RepositoryPath,
+                ".synrix",
+                "refs",
+                "remotes",
+                Reference.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar)
+            );
+            if (File.Exists(RemoteBranchPath))
+            {
+                return File.ReadAllText(RemoteBranchPath).Trim();
+            }
+
             // CHECK IF IT'S A TAG
             var TagPath = Path.Combine(RepositoryPath, ".synrix", "refs", "tags", Reference);
             if (File.Exists(TagPath))

@@ -75,12 +75,6 @@ namespace Synrix.Core
         {
             var Result = new MergeResult();
 
-            // VALIDATE BRANCH
-            if (!BranchMgr.BranchExists(BranchName))
-            {
-                throw new InvalidOperationException($"BRANCH NOT FOUND: {BranchName}");
-            }
-
             var CurrentBranch = RepoManager.GetCurrentBranch();
             if (CurrentBranch == BranchName)
             {
@@ -89,11 +83,16 @@ namespace Synrix.Core
 
             // GET COMMIT HASHES
             var CurrentCommit = RepoManager.GetCurrentCommit();
-            var TargetCommit = BranchMgr.GetBranchCommit(BranchName);
+            var TargetCommit = CommitMgr.ResolveReference(BranchName);
 
             if (string.IsNullOrEmpty(CurrentCommit))
             {
                 throw new InvalidOperationException("NO COMMITS IN CURRENT BRANCH");
+            }
+
+            if (string.IsNullOrEmpty(TargetCommit))
+            {
+                throw new InvalidOperationException($"REFERENCE NOT FOUND: {BranchName}");
             }
 
             if (CurrentCommit == TargetCommit)

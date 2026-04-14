@@ -8,7 +8,10 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Synrix.Utils;
 
 namespace Synrix.Core
 {
@@ -60,13 +63,180 @@ namespace Synrix.Core
         }
     }
 
+    public class RemoteFileSnapshot
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("path")]
+        public string Path { get; set; } = string.Empty;
+
+        [JsonPropertyName("type")]
+        public string Type { get; set; } = string.Empty;
+
+        [JsonPropertyName("size")]
+        public string? Size { get; set; }
+
+        [JsonPropertyName("content")]
+        public string? Content { get; set; }
+
+        [JsonPropertyName("children")]
+        public List<RemoteFileSnapshot> Children { get; set; } = new List<RemoteFileSnapshot>();
+    }
+
+    public class HttpRemoteUserInfo
+    {
+        [JsonPropertyName("username")]
+        public string Username { get; set; } = string.Empty;
+
+        [JsonPropertyName("displayName")]
+        public string DisplayName { get; set; } = string.Empty;
+    }
+
+    public class HttpRemoteCommitInfo
+    {
+        [JsonPropertyName("sha")]
+        public string Sha { get; set; } = string.Empty;
+
+        [JsonPropertyName("message")]
+        public string Message { get; set; } = string.Empty;
+
+        [JsonPropertyName("author")]
+        public string Author { get; set; } = string.Empty;
+    }
+
+    public class HttpRemoteBranchSummary
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("isDefault")]
+        public bool IsDefault { get; set; }
+
+        [JsonPropertyName("headSha")]
+        public string? HeadSha { get; set; }
+    }
+
+    public class HttpRemoteBranchInfo
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("headSha")]
+        public string? HeadSha { get; set; }
+
+        [JsonPropertyName("headCommit")]
+        public HttpRemoteCommitInfo? HeadCommit { get; set; }
+
+        [JsonPropertyName("treeSnapshot")]
+        public List<RemoteFileSnapshot> TreeSnapshot { get; set; } = new List<RemoteFileSnapshot>();
+    }
+
+    public class HttpRemoteInfoResponse
+    {
+        [JsonPropertyName("owner")]
+        public string Owner { get; set; } = string.Empty;
+
+        [JsonPropertyName("slug")]
+        public string Slug { get; set; } = string.Empty;
+
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("defaultBranch")]
+        public string DefaultBranch { get; set; } = string.Empty;
+
+        [JsonPropertyName("selectedBranch")]
+        public string SelectedBranch { get; set; } = string.Empty;
+
+        [JsonPropertyName("canWrite")]
+        public bool CanWrite { get; set; }
+
+        [JsonPropertyName("branches")]
+        public List<HttpRemoteBranchSummary> Branches { get; set; } = new List<HttpRemoteBranchSummary>();
+
+        [JsonPropertyName("branch")]
+        public HttpRemoteBranchInfo? Branch { get; set; }
+    }
+
+    public class HttpRemotePushFile
+    {
+        [JsonPropertyName("path")]
+        public string Path { get; set; } = string.Empty;
+
+        [JsonPropertyName("content")]
+        public string Content { get; set; } = string.Empty;
+    }
+
+    public class HttpRemotePushRequest
+    {
+        [JsonPropertyName("branch_name")]
+        public string BranchName { get; set; } = string.Empty;
+
+        [JsonPropertyName("expected_head_sha")]
+        public string? ExpectedHeadSha { get; set; }
+
+        [JsonPropertyName("message")]
+        public string Message { get; set; } = string.Empty;
+
+        [JsonPropertyName("files")]
+        public List<HttpRemotePushFile> Files { get; set; } = new List<HttpRemotePushFile>();
+
+        [JsonPropertyName("force")]
+        public bool Force { get; set; }
+    }
+
+    public class HttpRemotePushResponse
+    {
+        [JsonPropertyName("branch")]
+        public string Branch { get; set; } = string.Empty;
+
+        [JsonPropertyName("headSha")]
+        public string HeadSha { get; set; } = string.Empty;
+
+        [JsonPropertyName("message")]
+        public string Message { get; set; } = string.Empty;
+
+        [JsonPropertyName("filesChanged")]
+        public int FilesChanged { get; set; }
+
+        [JsonPropertyName("commit")]
+        public HttpRemoteCommitInfo? Commit { get; set; }
+    }
+
+    public class HttpRemoteLoginResponse
+    {
+        [JsonPropertyName("accessToken")]
+        public string AccessToken { get; set; } = string.Empty;
+
+        [JsonPropertyName("user")]
+        public HttpRemoteUserInfo? User { get; set; }
+    }
+
+    public class HttpRemoteDescriptor
+    {
+        public string BaseUrl { get; set; } = string.Empty;
+        public string Owner { get; set; } = string.Empty;
+        public string Slug { get; set; } = string.Empty;
+        public string InfoUrl { get; set; } = string.Empty;
+        public string PushUrl { get; set; } = string.Empty;
+        public string LoginUrl { get; set; } = string.Empty;
+    }
+
     // REMOTE MANAGER
     public class RemoteManager
     {
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = true
+        };
+
         private readonly string RepositoryPath;
         private readonly string RemotesPath;
         private readonly string ConfigPath;
         private readonly ObjectStorage Storage;
+        private readonly RepositoryManager RepoManager;
         private readonly BranchManager BranchMgr;
         private readonly CommitManager CommitMgr;
 
@@ -76,6 +246,7 @@ namespace Synrix.Core
             RemotesPath = Path.Combine(RepositoryPath, ".synrix", "remotes");
             ConfigPath = Path.Combine(RepositoryPath, ".synrix", "config");
             Storage = new ObjectStorage(RepositoryPath);
+            RepoManager = new RepositoryManager(RepositoryPath);
             BranchMgr = new BranchManager(RepositoryPath);
             CommitMgr = new CommitManager(RepositoryPath);
             InitializeRemotes();
@@ -276,7 +447,7 @@ namespace Synrix.Core
 
                 case RemoteType.HTTP:
                 case RemoteType.HTTPS:
-                    return await PushToHttpRemoteAsync(RemoteUrl, BranchName, Force);
+                    return await PushToHttpRemoteAsync(RemoteName, RemoteUrl, BranchName, Force);
 
                 case RemoteType.SSH:
                     Result.Success = false;
@@ -343,16 +514,64 @@ namespace Synrix.Core
         }
 
         // PUSH TO HTTP REMOTE
-        private async Task<PushResult> PushToHttpRemoteAsync(string RemoteUrl, string BranchName, bool Force)
+        private async Task<PushResult> PushToHttpRemoteAsync(string RemoteName, string RemoteUrl, string BranchName, bool Force)
         {
             var Result = new PushResult();
 
-            // TODO: Implement HTTP push protocol
-            Result.Success = false;
-            Result.Message = "HTTP PUSH NOT YET FULLY IMPLEMENTED";
-            Console.WriteLine(Result.Message);
+            var Token = GetConfiguredAuthToken(RemoteName);
+            if (string.IsNullOrWhiteSpace(Token))
+            {
+                Result.Success = false;
+                Result.Message = "HTTP PUSH REQUIRES AUTHENTICATION. RUN 'synrix login <site-url> <email> <password>' FIRST";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
 
-            return await Task.FromResult(Result);
+            try
+            {
+                var CurrentCommitHash = RepoManager.GetCurrentCommit();
+                if (string.IsNullOrEmpty(CurrentCommitHash))
+                {
+                    Result.Success = false;
+                    Result.Message = "NO COMMITS TO PUSH";
+                    Console.WriteLine(Result.Message);
+                    return Result;
+                }
+
+                var CurrentCommit = CommitMgr.GetCommit(CurrentCommitHash);
+                var Snapshot = BuildSnapshotFromCommit(CurrentCommitHash);
+                var Request = new HttpRemotePushRequest
+                {
+                    BranchName = BranchName,
+                    ExpectedHeadSha = GetTrackedRemoteHead(RemoteName, BranchName),
+                    Message = CurrentCommit.Message,
+                    Files = FlattenSnapshotFiles(Snapshot),
+                    Force = Force
+                };
+
+                var Descriptor = ParseHttpRemoteDescriptor(RemoteUrl);
+                var Response = await SendJsonAsync<HttpRemotePushResponse>(HttpMethod.Post, Descriptor.PushUrl, Request, Token);
+
+                SaveRemoteTrackingRef(RemoteName, BranchName, Response.HeadSha);
+                SaveRemoteSnapshot(RemoteName, BranchName, Snapshot, markApplied: false);
+                SaveRemoteSnapshot(RemoteName, BranchName, Snapshot, markApplied: true);
+                SaveSyncedLocalCommit(RemoteName, BranchName, CurrentCommitHash);
+
+                Result.Success = true;
+                Result.Message = string.IsNullOrWhiteSpace(Response.Message)
+                    ? $"PUSHED {BranchName} -> {Response.HeadSha.Substring(0, Math.Min(7, Response.HeadSha.Length))}"
+                    : Response.Message;
+                Result.PushedRefs.Add($"{BranchName}:{Response.HeadSha}");
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
+            catch (Exception Ex)
+            {
+                Result.Success = false;
+                Result.Message = $"PUSH FAILED: {Ex.Message}";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
         }
 
         // FETCH FROM REMOTE
@@ -462,17 +681,66 @@ namespace Synrix.Core
         {
             var Result = new FetchResult();
 
-            // TODO: Implement HTTP fetch protocol
-            Result.Success = false;
-            Result.Message = "HTTP FETCH NOT YET FULLY IMPLEMENTED";
-            Console.WriteLine(Result.Message);
+            try
+            {
+                var Token = GetConfiguredAuthToken(RemoteName);
+                var RemoteInfo = await GetHttpRemoteInfoAsync(RemoteUrl, BranchName, Token);
+                var BranchNames = BranchName != null
+                    ? new List<string> { BranchName }
+                    : RemoteInfo.Branches.Select(branch => branch.Name).ToList();
 
-            return await Task.FromResult(Result);
+                foreach (var RemoteBranchName in BranchNames)
+                {
+                    var BranchInfo = RemoteInfo.Branch != null && RemoteInfo.Branch.Name == RemoteBranchName
+                        ? RemoteInfo.Branch
+                        : (await GetHttpRemoteInfoAsync(RemoteUrl, RemoteBranchName, Token)).Branch;
+
+                    if (BranchInfo == null || string.IsNullOrEmpty(BranchInfo.HeadSha))
+                    {
+                        continue;
+                    }
+
+                    SaveRemoteTrackingRef(RemoteName, RemoteBranchName, BranchInfo.HeadSha);
+                    SaveRemoteSnapshot(RemoteName, RemoteBranchName, BranchInfo.TreeSnapshot, markApplied: false);
+
+                    Result.FetchedRefs.Add($"{RemoteName}/{RemoteBranchName}");
+                    Result.UpdatedRefs[$"{RemoteName}/{RemoteBranchName}"] = BranchInfo.HeadSha;
+                    Console.WriteLine($"  {RemoteBranchName} -> {BranchInfo.HeadSha.Substring(0, Math.Min(7, BranchInfo.HeadSha.Length))}");
+                }
+
+                Result.Success = Result.FetchedRefs.Count > 0;
+                Result.Message = Result.Success
+                    ? $"FETCHED {Result.FetchedRefs.Count} BRANCH(ES)"
+                    : "NO REMOTE BRANCHES FOUND";
+                Console.WriteLine(Result.Message);
+
+                return Result;
+            }
+            catch (Exception Ex)
+            {
+                Result.Success = false;
+                Result.Message = $"FETCH FAILED: {Ex.Message}";
+                Console.WriteLine(Result.Message);
+                return Result;
+            }
         }
 
         // PULL FROM REMOTE (FETCH + MERGE)
         public async Task<bool> PullAsync(string RemoteName, string BranchName)
         {
+            if (!RemoteExists(RemoteName))
+            {
+                return false;
+            }
+
+            var RemoteUrl = GetRemoteUrl(RemoteName);
+            var RemoteType = DetermineRemoteType(RemoteUrl);
+
+            if (RemoteType == RemoteType.HTTP || RemoteType == RemoteType.HTTPS)
+            {
+                return await PullFromHttpRemoteAsync(RemoteName, RemoteUrl, BranchName);
+            }
+
             // FETCH FROM REMOTE
             var FetchResult = await FetchAsync(RemoteName, BranchName);
 
@@ -498,25 +766,77 @@ namespace Synrix.Core
         }
 
         // CLONE REPOSITORY
-        public static async Task<bool> CloneAsync(string RemoteUrl, string TargetPath, string Branch = "main")
+        public static async Task<bool> CloneAsync(string RemoteUrl, string TargetPath, string Branch = null)
         {
             try
             {
                 Console.WriteLine($"CLONING {RemoteUrl} INTO {TargetPath}...");
 
+                EnsureCloneTarget(TargetPath);
+                var RemoteType = DetermineRemoteTypeFromUrl(RemoteUrl);
+
+                if (RemoteType == RemoteType.HTTP || RemoteType == RemoteType.HTTPS)
+                {
+                    var Token = GetGlobalAuthToken();
+                    var RemoteInfo = await GetHttpRemoteInfoForCloneAsync(RemoteUrl, Branch, Token);
+                    if (RemoteInfo.Branch == null)
+                    {
+                        Console.WriteLine("CLONE FAILED: REMOTE BRANCH NOT FOUND");
+                        return false;
+                    }
+
+                    var InitialBranch = string.IsNullOrWhiteSpace(RemoteInfo.Branch.Name)
+                        ? (string.IsNullOrWhiteSpace(RemoteInfo.DefaultBranch) ? "main" : RemoteInfo.DefaultBranch)
+                        : RemoteInfo.Branch.Name;
+
+                    var RepoMgr = new RepositoryManager(TargetPath);
+                    RepoMgr.InitializeRepository(InitialBranch);
+
+                    var RemoteMgr = new RemoteManager(TargetPath);
+                    RemoteMgr.AddRemote("origin", RemoteUrl);
+                    RemoteMgr.WriteSnapshotToWorkingDirectory(RemoteInfo.Branch.TreeSnapshot);
+                    string? LocalCommitHash = null;
+
+                    if (RemoteMgr.HasFileEntries(RemoteInfo.Branch.TreeSnapshot))
+                    {
+                        var Staging = new StagingArea(TargetPath);
+                        Staging.AddAll();
+
+                        var CommitMgr = new CommitManager(TargetPath);
+                        var CommitMessage = RemoteInfo.Branch.HeadCommit?.Message ?? $"CLONE {RemoteInfo.Slug}";
+                        var CommitAuthor = RemoteInfo.Branch.HeadCommit?.Author ?? $"{RemoteInfo.Owner} <unknown@synrix.remote>";
+                        LocalCommitHash = CommitMgr.CreateCommit(CommitMessage, CommitAuthor, CommitAuthor);
+                    }
+
+                    if (!string.IsNullOrEmpty(RemoteInfo.Branch.HeadSha))
+                    {
+                        RemoteMgr.SaveRemoteTrackingRef("origin", InitialBranch, RemoteInfo.Branch.HeadSha);
+                    }
+                    RemoteMgr.SaveRemoteSnapshot("origin", InitialBranch, RemoteInfo.Branch.TreeSnapshot, markApplied: false);
+                    RemoteMgr.SaveRemoteSnapshot("origin", InitialBranch, RemoteInfo.Branch.TreeSnapshot, markApplied: true);
+                    if (!string.IsNullOrEmpty(LocalCommitHash))
+                    {
+                        RemoteMgr.SaveSyncedLocalCommit("origin", InitialBranch, LocalCommitHash);
+                    }
+
+                    Console.WriteLine($"CLONED SUCCESSFULLY INTO {TargetPath}");
+                    return true;
+                }
+
                 // CREATE TARGET DIRECTORY
                 Directory.CreateDirectory(TargetPath);
 
                 // INITIALIZE REPOSITORY
-                var RepoMgr = new RepositoryManager(TargetPath);
-                RepoMgr.InitializeRepository();
+                var LocalBranch = string.IsNullOrWhiteSpace(Branch) ? "main" : Branch;
+                var LocalRepoMgr = new RepositoryManager(TargetPath);
+                LocalRepoMgr.InitializeRepository(LocalBranch);
 
                 // ADD REMOTE
-                var RemoteMgr = new RemoteManager(TargetPath);
-                RemoteMgr.AddRemote("origin", RemoteUrl);
+                var LocalRemoteMgr = new RemoteManager(TargetPath);
+                LocalRemoteMgr.AddRemote("origin", RemoteUrl);
 
                 // FETCH FROM REMOTE
-                var FetchResult = await RemoteMgr.FetchAsync("origin", Branch);
+                var FetchResult = await LocalRemoteMgr.FetchAsync("origin", LocalBranch);
 
                 if (!FetchResult.Success)
                 {
@@ -526,11 +846,11 @@ namespace Synrix.Core
 
                 // CHECKOUT BRANCH
                 var BranchMgr = new BranchManager(TargetPath);
-                var RemoteCommit = FetchResult.UpdatedRefs[$"origin/{Branch}"];
+                var RemoteCommit = FetchResult.UpdatedRefs[$"origin/{LocalBranch}"];
 
                 // CREATE LOCAL BRANCH
-                BranchMgr.CreateBranch(Branch, RemoteCommit);
-                BranchMgr.SwitchBranch(Branch);
+                BranchMgr.CreateBranch(LocalBranch, RemoteCommit);
+                BranchMgr.SwitchBranch(LocalBranch);
 
                 Console.WriteLine($"CLONED SUCCESSFULLY INTO {TargetPath}");
                 return true;
@@ -543,6 +863,598 @@ namespace Synrix.Core
         }
 
         // HELPER METHODS
+
+        public static async Task<bool> LoginAsync(string SiteUrl, string Email, string Password)
+        {
+            try
+            {
+                var BaseUrl = GetSiteBaseUrl(string.IsNullOrWhiteSpace(SiteUrl) ? throw new ArgumentException("SITE URL REQUIRED") : SiteUrl.TrimEnd('/'));
+                var Response = await SendJsonAsync<HttpRemoteLoginResponse>(
+                    HttpMethod.Post,
+                    $"{BaseUrl}/api/auth/login",
+                    new { email = Email, password = Password }
+                );
+
+                if (string.IsNullOrWhiteSpace(Response.AccessToken))
+                {
+                    throw new InvalidOperationException("LOGIN DID NOT RETURN AN ACCESS TOKEN");
+                }
+
+                var GlobalConfigPath = ConfigUtil.GetGlobalConfigPath();
+                var GlobalConfig = ConfigUtil.LoadConfig(GlobalConfigPath);
+                GlobalConfig["auth.site"] = BaseUrl;
+                GlobalConfig["auth.token"] = Response.AccessToken;
+
+                if (Response.User != null && !string.IsNullOrWhiteSpace(Response.User.Username))
+                {
+                    GlobalConfig["auth.user"] = Response.User.Username;
+                }
+
+                ConfigUtil.SaveConfig(GlobalConfigPath, GlobalConfig);
+
+                Console.WriteLine($"LOGGED IN TO {BaseUrl} AS {Response.User?.Username ?? Email}");
+                return true;
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"LOGIN FAILED: {Ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<bool> PullFromHttpRemoteAsync(string RemoteName, string RemoteUrl, string BranchName)
+        {
+            try
+            {
+                var CurrentCommitHash = RepoManager.GetCurrentCommit();
+                var SyncedLocalCommit = LoadSyncedLocalCommit(RemoteName, BranchName);
+
+                EnsureWorkingTreeCleanForRemoteApply();
+
+                if (!string.IsNullOrEmpty(CurrentCommitHash))
+                {
+                    if (string.IsNullOrEmpty(SyncedLocalCommit))
+                    {
+                        Console.WriteLine("HTTP PULL REQUIRES A REPOSITORY THAT WAS CLONED OR PREVIOUSLY SYNCHRONIZED WITH THIS REMOTE");
+                        return false;
+                    }
+
+                    if (!string.Equals(CurrentCommitHash, SyncedLocalCommit, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine("LOCAL BRANCH HAS DIVERGED FROM THE LAST SYNCHRONIZED REMOTE STATE");
+                        Console.WriteLine("PUSH YOUR LOCAL COMMITS FIRST OR CLONE A FRESH WORKTREE");
+                        return false;
+                    }
+                }
+
+                var Token = GetConfiguredAuthToken(RemoteName);
+                var RemoteInfo = await GetHttpRemoteInfoAsync(RemoteUrl, BranchName, Token);
+                if (RemoteInfo.Branch == null)
+                {
+                    Console.WriteLine("REMOTE BRANCH NOT FOUND");
+                    return false;
+                }
+
+                var RemoteBranch = RemoteInfo.Branch.Name;
+                var RemoteSnapshot = RemoteInfo.Branch.TreeSnapshot ?? new List<RemoteFileSnapshot>();
+
+                if (!string.IsNullOrEmpty(CurrentCommitHash))
+                {
+                    var CurrentSnapshot = BuildSnapshotFromCommit(CurrentCommitHash);
+                    if (SnapshotsEqual(CurrentSnapshot, RemoteSnapshot))
+                    {
+                        if (!string.IsNullOrEmpty(RemoteInfo.Branch.HeadSha))
+                        {
+                            SaveRemoteTrackingRef(RemoteName, RemoteBranch, RemoteInfo.Branch.HeadSha);
+                        }
+                        SaveRemoteSnapshot(RemoteName, RemoteBranch, RemoteSnapshot, markApplied: false);
+                        SaveRemoteSnapshot(RemoteName, RemoteBranch, RemoteSnapshot, markApplied: true);
+                        SaveSyncedLocalCommit(RemoteName, RemoteBranch, CurrentCommitHash);
+                        Console.WriteLine("ALREADY UP TO DATE");
+                        return true;
+                    }
+                }
+
+                WriteSnapshotToWorkingDirectory(RemoteSnapshot);
+
+                var Staging = new StagingArea(RepositoryPath);
+                Staging.Clear();
+                string? LocalCommitHash = null;
+
+                if (HasFileEntries(RemoteSnapshot))
+                {
+                    Staging.AddAll();
+
+                    var CommitMessage = RemoteInfo.Branch.HeadCommit?.Message ?? $"PULL {RemoteBranch} FROM {RemoteName}";
+                    var CommitAuthor = RemoteInfo.Branch.HeadCommit?.Author ?? $"{RemoteInfo.Owner} <unknown@synrix.remote>";
+                    var LocalCommitMgr = new CommitManager(RepositoryPath);
+                    LocalCommitHash = LocalCommitMgr.CreateCommit(CommitMessage, CommitAuthor, CommitAuthor);
+                }
+
+                if (!string.IsNullOrEmpty(RemoteInfo.Branch.HeadSha))
+                {
+                    SaveRemoteTrackingRef(RemoteName, RemoteBranch, RemoteInfo.Branch.HeadSha);
+                }
+                SaveRemoteSnapshot(RemoteName, RemoteBranch, RemoteSnapshot, markApplied: false);
+                SaveRemoteSnapshot(RemoteName, RemoteBranch, RemoteSnapshot, markApplied: true);
+                if (!string.IsNullOrEmpty(LocalCommitHash))
+                {
+                    SaveSyncedLocalCommit(RemoteName, RemoteBranch, LocalCommitHash);
+                }
+
+                Console.WriteLine($"UPDATED {RemoteBranch} FROM {RemoteName}");
+                return true;
+            }
+            catch (Exception Ex)
+            {
+                Console.WriteLine($"PULL FAILED: {Ex.Message}");
+                return false;
+            }
+        }
+
+        private string? GetConfiguredAuthToken(string RemoteName)
+        {
+            var RepoConfig = new RepositoryManager(RepositoryPath).LoadConfig();
+
+            if (RepoConfig.CustomSettings.TryGetValue($"remote.{RemoteName}.token", out var RemoteToken) && !string.IsNullOrWhiteSpace(RemoteToken))
+            {
+                return RemoteToken;
+            }
+
+            if (RepoConfig.CustomSettings.TryGetValue("auth.token", out var LocalToken) && !string.IsNullOrWhiteSpace(LocalToken))
+            {
+                return LocalToken;
+            }
+
+            return GetGlobalAuthToken();
+        }
+
+        private static string? GetGlobalAuthToken()
+        {
+            var EnvironmentToken = Environment.GetEnvironmentVariable("SYNRIX_TOKEN");
+            if (!string.IsNullOrWhiteSpace(EnvironmentToken))
+            {
+                return EnvironmentToken;
+            }
+
+            var GlobalConfig = ConfigUtil.LoadConfig(ConfigUtil.GetGlobalConfigPath());
+            if (GlobalConfig.TryGetValue("auth.token", out var Token) && !string.IsNullOrWhiteSpace(Token))
+            {
+                return Token;
+            }
+
+            return null;
+        }
+
+        private static HttpRemoteDescriptor ParseHttpRemoteDescriptor(string RemoteUrl)
+        {
+            var ParsedUrl = new Uri(GetSiteBaseUrl(RemoteUrl) + new Uri(RemoteUrl.Contains("://", StringComparison.OrdinalIgnoreCase) ? RemoteUrl : $"https://{RemoteUrl}").AbsolutePath);
+
+            var Segments = ParsedUrl.AbsolutePath
+                .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(Uri.UnescapeDataString)
+                .ToList();
+
+            if (Segments.Count < 2)
+            {
+                throw new InvalidOperationException("HTTP REMOTE URL MUST BE IN THE FORM <site>/<owner>/<repository>");
+            }
+
+            var Owner = Segments[^2];
+            var Slug = Segments[^1];
+            if (Slug.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            {
+                Slug = Slug.Substring(0, Slug.Length - 4);
+            }
+
+            var BaseUrl = $"{ParsedUrl.Scheme}://{ParsedUrl.Authority}";
+            var EncodedOwner = Uri.EscapeDataString(Owner);
+            var EncodedSlug = Uri.EscapeDataString(Slug);
+
+            return new HttpRemoteDescriptor
+            {
+                BaseUrl = BaseUrl,
+                Owner = Owner,
+                Slug = Slug,
+                InfoUrl = $"{BaseUrl}/api/repositories/remote/{EncodedOwner}/{EncodedSlug}",
+                PushUrl = $"{BaseUrl}/api/repositories/remote/{EncodedOwner}/{EncodedSlug}/push",
+                LoginUrl = $"{BaseUrl}/api/auth/login"
+            };
+        }
+
+        private static string GetSiteBaseUrl(string Url)
+        {
+            var ParsedUrl = Url.Contains("://", StringComparison.OrdinalIgnoreCase)
+                ? new Uri(Url)
+                : new Uri($"https://{Url}");
+
+            return $"{ParsedUrl.Scheme}://{ParsedUrl.Authority}";
+        }
+
+        private static async Task<HttpRemoteInfoResponse> GetHttpRemoteInfoForCloneAsync(string RemoteUrl, string? BranchName, string? Token)
+        {
+            return await GetHttpRemoteInfoAsync(RemoteUrl, BranchName, Token);
+        }
+
+        private static async Task<HttpRemoteInfoResponse> GetHttpRemoteInfoAsync(string RemoteUrl, string? BranchName, string? Token)
+        {
+            var Descriptor = ParseHttpRemoteDescriptor(RemoteUrl);
+            var InfoUrl = string.IsNullOrWhiteSpace(BranchName)
+                ? Descriptor.InfoUrl
+                : $"{Descriptor.InfoUrl}?branch={Uri.EscapeDataString(BranchName)}";
+
+            return await SendJsonAsync<HttpRemoteInfoResponse>(HttpMethod.Get, InfoUrl, null, Token);
+        }
+
+        private static async Task<T> SendJsonAsync<T>(HttpMethod Method, string Url, object? Payload = null, string? Token = null)
+        {
+            using var Client = new HttpClient();
+            using var Request = new HttpRequestMessage(Method, Url);
+
+            if (!string.IsNullOrWhiteSpace(Token))
+            {
+                Request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {Token}");
+            }
+
+            if (Payload != null)
+            {
+                var JsonBody = JsonSerializer.Serialize(Payload, JsonOptions);
+                Request.Content = new StringContent(JsonBody, Encoding.UTF8, "application/json");
+            }
+
+            using var Response = await Client.SendAsync(Request);
+            var ResponseBody = await Response.Content.ReadAsStringAsync();
+
+            if (!Response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(GetRemoteErrorMessage(ResponseBody, (int)Response.StatusCode));
+            }
+
+            if (string.IsNullOrWhiteSpace(ResponseBody))
+            {
+                return Activator.CreateInstance<T>();
+            }
+
+            var Deserialized = JsonSerializer.Deserialize<T>(ResponseBody, JsonOptions);
+            if (Deserialized == null)
+            {
+                throw new InvalidOperationException("REMOTE RETURNED AN EMPTY RESPONSE");
+            }
+
+            return Deserialized;
+        }
+
+        private static string GetRemoteErrorMessage(string ResponseBody, int StatusCode)
+        {
+            if (!string.IsNullOrWhiteSpace(ResponseBody))
+            {
+                try
+                {
+                    using var Document = JsonDocument.Parse(ResponseBody);
+                    if (Document.RootElement.TryGetProperty("detail", out var Detail) && Detail.ValueKind == JsonValueKind.String)
+                    {
+                        return Detail.GetString() ?? $"HTTP REQUEST FAILED ({StatusCode})";
+                    }
+                }
+                catch
+                {
+                    // FALL BACK TO RAW RESPONSE CONTENT BELOW.
+                }
+
+                return ResponseBody;
+            }
+
+            return $"HTTP REQUEST FAILED ({StatusCode})";
+        }
+
+        private List<RemoteFileSnapshot> BuildSnapshotFromCommit(string CommitHash)
+        {
+            var Commit = Storage.GetCommit(CommitHash);
+            return BuildSnapshotFromTree(Commit.TreeHash);
+        }
+
+        private List<RemoteFileSnapshot> BuildSnapshotFromTree(string TreeHash, string Prefix = "")
+        {
+            var Snapshot = new List<RemoteFileSnapshot>();
+            var Tree = Storage.GetTree(TreeHash);
+
+            foreach (var Entry in Tree.OrderBy(entry => entry.Name))
+            {
+                var EntryPath = string.IsNullOrEmpty(Prefix) ? Entry.Name : $"{Prefix}/{Entry.Name}";
+
+                if (Entry.Type == "blob")
+                {
+                    var Content = Encoding.UTF8.GetString(Storage.GetBlob(Entry.Hash));
+                    Snapshot.Add(new RemoteFileSnapshot
+                    {
+                        Name = Entry.Name,
+                        Path = EntryPath,
+                        Type = "file",
+                        Size = FormatSizeLabel(Content),
+                        Content = Content
+                    });
+                    continue;
+                }
+
+                Snapshot.Add(new RemoteFileSnapshot
+                {
+                    Name = Entry.Name,
+                    Path = EntryPath,
+                    Type = "folder",
+                    Children = BuildSnapshotFromTree(Entry.Hash, EntryPath)
+                });
+            }
+
+            return Snapshot;
+        }
+
+        private List<HttpRemotePushFile> FlattenSnapshotFiles(IEnumerable<RemoteFileSnapshot> Snapshot)
+        {
+            var Files = new List<HttpRemotePushFile>();
+
+            foreach (var Entry in Snapshot)
+            {
+                if (Entry.Type == "file")
+                {
+                    Files.Add(new HttpRemotePushFile
+                    {
+                        Path = Entry.Path,
+                        Content = Entry.Content ?? string.Empty
+                    });
+                    continue;
+                }
+
+                Files.AddRange(FlattenSnapshotFiles(Entry.Children));
+            }
+
+            return Files;
+        }
+
+        private bool HasFileEntries(IEnumerable<RemoteFileSnapshot> Snapshot)
+        {
+            foreach (var Entry in Snapshot)
+            {
+                if (Entry.Type == "file")
+                {
+                    return true;
+                }
+
+                if (HasFileEntries(Entry.Children))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void EnsureWorkingTreeCleanForRemoteApply()
+        {
+            var Status = RepoManager.GetStatus();
+            if (Status.StagedFiles.Count > 0 || Status.ModifiedFiles.Count > 0 || Status.DeletedFiles.Count > 0 || Status.UntrackedFiles.Count > 0)
+            {
+                throw new InvalidOperationException("WORKING TREE IS NOT CLEAN");
+            }
+        }
+
+        private void WriteSnapshotToWorkingDirectory(List<RemoteFileSnapshot> Snapshot)
+        {
+            ClearTrackedWorkingTree();
+
+            foreach (var Entry in Snapshot)
+            {
+                WriteSnapshotEntry(Entry);
+            }
+        }
+
+        private void WriteSnapshotEntry(RemoteFileSnapshot Entry)
+        {
+            var RelativePath = Entry.Path.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+            var FullPath = Path.Combine(RepositoryPath, RelativePath);
+
+            if (Entry.Type == "folder")
+            {
+                Directory.CreateDirectory(FullPath);
+                foreach (var Child in Entry.Children)
+                {
+                    WriteSnapshotEntry(Child);
+                }
+                return;
+            }
+
+            var ParentDirectory = Path.GetDirectoryName(FullPath);
+            if (!string.IsNullOrEmpty(ParentDirectory))
+            {
+                Directory.CreateDirectory(ParentDirectory);
+            }
+            File.WriteAllText(FullPath, Entry.Content ?? string.Empty, new UTF8Encoding(false));
+        }
+
+        private void ClearTrackedWorkingTree()
+        {
+            var IndexEntries = new StagingArea(RepositoryPath).GetAllEntries();
+            foreach (var FilePath in IndexEntries.Keys)
+            {
+                var FullPath = Path.Combine(RepositoryPath, FilePath.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(FullPath))
+                {
+                    File.Delete(FullPath);
+                }
+            }
+
+            RemoveEmptyDirectories(RepositoryPath);
+        }
+
+        private void RemoveEmptyDirectories(string RootPath)
+        {
+            foreach (var DirectoryPath in Directory.GetDirectories(RootPath))
+            {
+                var Name = Path.GetFileName(DirectoryPath);
+                if (Name == ".synrix")
+                {
+                    continue;
+                }
+
+                RemoveEmptyDirectories(DirectoryPath);
+                if (Directory.GetFileSystemEntries(DirectoryPath).Length == 0)
+                {
+                    Directory.Delete(DirectoryPath);
+                }
+            }
+        }
+
+        private string? GetTrackedRemoteHead(string RemoteName, string BranchName)
+        {
+            var TrackingPath = GetRemoteTrackingRefPath(RemoteName, BranchName);
+            return File.Exists(TrackingPath) ? File.ReadAllText(TrackingPath).Trim() : null;
+        }
+
+        private void SaveRemoteTrackingRef(string RemoteName, string BranchName, string CommitHash)
+        {
+            var TrackingPath = GetRemoteTrackingRefPath(RemoteName, BranchName);
+            var TrackingDirectory = Path.GetDirectoryName(TrackingPath);
+            if (!string.IsNullOrEmpty(TrackingDirectory))
+            {
+                Directory.CreateDirectory(TrackingDirectory);
+            }
+
+            File.WriteAllText(TrackingPath, CommitHash);
+        }
+
+        private string GetRemoteTrackingRefPath(string RemoteName, string BranchName)
+        {
+            return Path.Combine(RepositoryPath, ".synrix", "refs", "remotes", RemoteName, NormalizeReferencePath(BranchName));
+        }
+
+        private string GetRemoteSnapshotPath(string RemoteName, string BranchName, bool markApplied)
+        {
+            var SnapshotRoot = Path.Combine(RemotesPath, RemoteName, markApplied ? "applied" : "snapshots");
+            return Path.Combine(SnapshotRoot, NormalizeReferencePath(BranchName) + ".json");
+        }
+
+        private string GetSyncedLocalCommitPath(string RemoteName, string BranchName)
+        {
+            return Path.Combine(RemotesPath, RemoteName, "state", NormalizeReferencePath(BranchName) + ".commit");
+        }
+
+        private static string NormalizeReferencePath(string Reference)
+        {
+            return Reference.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+        }
+
+        private List<RemoteFileSnapshot>? LoadRemoteSnapshot(string RemoteName, string BranchName, bool markApplied)
+        {
+            var SnapshotPath = GetRemoteSnapshotPath(RemoteName, BranchName, markApplied);
+            if (!File.Exists(SnapshotPath))
+            {
+                return null;
+            }
+
+            var JsonContent = File.ReadAllText(SnapshotPath);
+            return JsonSerializer.Deserialize<List<RemoteFileSnapshot>>(JsonContent, JsonOptions);
+        }
+
+        private string? LoadSyncedLocalCommit(string RemoteName, string BranchName)
+        {
+            var SyncedCommitPath = GetSyncedLocalCommitPath(RemoteName, BranchName);
+            if (!File.Exists(SyncedCommitPath))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(SyncedCommitPath).Trim();
+        }
+
+        private void SaveRemoteSnapshot(string RemoteName, string BranchName, List<RemoteFileSnapshot> Snapshot, bool markApplied)
+        {
+            var SnapshotPath = GetRemoteSnapshotPath(RemoteName, BranchName, markApplied);
+            var SnapshotDirectory = Path.GetDirectoryName(SnapshotPath);
+            if (!string.IsNullOrEmpty(SnapshotDirectory))
+            {
+                Directory.CreateDirectory(SnapshotDirectory);
+            }
+
+            File.WriteAllText(SnapshotPath, JsonSerializer.Serialize(Snapshot, JsonOptions));
+        }
+
+        private void SaveSyncedLocalCommit(string RemoteName, string BranchName, string CommitHash)
+        {
+            var SyncedCommitPath = GetSyncedLocalCommitPath(RemoteName, BranchName);
+            var SyncedCommitDirectory = Path.GetDirectoryName(SyncedCommitPath);
+            if (!string.IsNullOrEmpty(SyncedCommitDirectory))
+            {
+                Directory.CreateDirectory(SyncedCommitDirectory);
+            }
+
+            File.WriteAllText(SyncedCommitPath, CommitHash);
+        }
+
+        private bool SnapshotsEqual(List<RemoteFileSnapshot> Left, List<RemoteFileSnapshot> Right)
+        {
+            return JsonSerializer.Serialize(Left, JsonOptions) == JsonSerializer.Serialize(Right, JsonOptions);
+        }
+
+        private string FormatSizeLabel(string Content)
+        {
+            var ByteCount = Encoding.UTF8.GetByteCount(Content ?? string.Empty);
+            if (ByteCount < 1024)
+            {
+                return $"{ByteCount} B";
+            }
+
+            if (ByteCount < 1024 * 1024)
+            {
+                return $"{ByteCount / 1024.0:F1} KB";
+            }
+
+            return $"{ByteCount / (1024.0 * 1024.0):F1} MB";
+        }
+
+        private static void EnsureCloneTarget(string TargetPath)
+        {
+            if (Directory.Exists(TargetPath))
+            {
+                if (Directory.EnumerateFileSystemEntries(TargetPath).Any())
+                {
+                    throw new InvalidOperationException("TARGET DIRECTORY ALREADY EXISTS AND IS NOT EMPTY");
+                }
+
+                return;
+            }
+
+            Directory.CreateDirectory(TargetPath);
+        }
+
+        private static RemoteType DetermineRemoteTypeFromUrl(string Url)
+        {
+            if (string.IsNullOrEmpty(Url))
+            {
+                return RemoteType.Local;
+            }
+
+            if (Url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.HTTP;
+            }
+
+            if (Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.HTTPS;
+            }
+
+            if (Url.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) ||
+                Url.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.SSH;
+            }
+
+            if (Url.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
+            {
+                return RemoteType.Git;
+            }
+
+            return RemoteType.Local;
+        }
 
         private bool RemoteExists(string Name)
         {

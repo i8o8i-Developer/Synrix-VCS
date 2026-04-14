@@ -283,10 +283,23 @@ Thumbs.db
                 CurrentCommit = GetCurrentCommit()
             };
 
-            // GET STAGED FILES FROM INDEX
             var StagingArea = new StagingArea(RepositoryPath);
             var IndexEntries = StagingArea.GetAllEntries();
-            Status.StagedFiles = IndexEntries.Keys.ToList();
+            var HeadEntries = GetHeadEntries();
+
+            // ONLY REPORT FILES AS STAGED WHEN INDEX DIFFERS FROM HEAD.
+            var StagedFiles = new HashSet<string>();
+            foreach (var FilePath in IndexEntries.Keys.Union(HeadEntries.Keys))
+            {
+                var IndexHash = IndexEntries.ContainsKey(FilePath) ? IndexEntries[FilePath] : null;
+                var HeadHash = HeadEntries.ContainsKey(FilePath) ? HeadEntries[FilePath] : null;
+
+                if (IndexHash != HeadHash)
+                {
+                    StagedFiles.Add(FilePath);
+                }
+            }
+            Status.StagedFiles = StagedFiles.OrderBy(path => path).ToList();
 
             // GET WORKING DIRECTORY FILES
             var WorkingFiles = GetWorkingDirectoryFiles();
@@ -320,6 +333,54 @@ Thumbs.db
             }
 
             return Status;
+        }
+
+        private Dictionary<string, string> GetHeadEntries()
+        {
+            var CurrentCommit = GetCurrentCommit();
+            if (string.IsNullOrEmpty(CurrentCommit))
+            {
+                return new Dictionary<string, string>();
+            }
+
+            try
+            {
+                var Storage = new ObjectStorage(RepositoryPath);
+                var Commit = Storage.GetCommit(CurrentCommit);
+                var Tree = Storage.GetTree(Commit.TreeHash);
+                return FlattenTreeEntries(Storage, Tree);
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+        }
+
+        private Dictionary<string, string> FlattenTreeEntries(ObjectStorage Storage, List<TreeEntry> Tree, string Prefix = "")
+        {
+            var Entries = new Dictionary<string, string>();
+
+            foreach (var Entry in Tree)
+            {
+                var EntryPath = string.IsNullOrEmpty(Prefix) ? Entry.Name : $"{Prefix}/{Entry.Name}";
+
+                if (Entry.Type == "blob")
+                {
+                    Entries[EntryPath] = Entry.Hash;
+                    continue;
+                }
+
+                if (Entry.Type == "tree")
+                {
+                    var SubTree = Storage.GetTree(Entry.Hash);
+                    foreach (var SubEntry in FlattenTreeEntries(Storage, SubTree, EntryPath))
+                    {
+                        Entries[SubEntry.Key] = SubEntry.Value;
+                    }
+                }
+            }
+
+            return Entries;
         }
 
         // GET ALL FILES IN WORKING DIRECTORY
@@ -370,7 +431,7 @@ Thumbs.db
         {
             var RootUri = new Uri(RootPath.TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar);
             var FullUri = new Uri(FullPath);
-            return Uri.UnescapeDataString(RootUri.MakeRelativeUri(FullUri).ToString().Replace('/', System.IO.Path.DirectorySeparatorChar));
+            return Uri.UnescapeDataString(RootUri.MakeRelativeUri(FullUri).ToString()).Replace('\\', '/');
         }
 
         // LOAD IGNORE PATTERNS
@@ -433,13 +494,17 @@ Thumbs.db
         // COMPUTE FILE HASH
         private string ComputeFileHash(string FilePath)
         {
+            var FileContent = File.ReadAllBytes(FilePath);
+
             using (var Sha256 = System.Security.Cryptography.SHA256.Create())
             {
-                using (var Stream = File.OpenRead(FilePath))
-                {
-                    var HashBytes = Sha256.ComputeHash(Stream);
-                    return BitConverter.ToString(HashBytes).Replace("-", "").ToLower();
-                }
+                var Header = System.Text.Encoding.UTF8.GetBytes($"blob {FileContent.Length}\0");
+                var DataToHash = new byte[Header.Length + FileContent.Length];
+                Buffer.BlockCopy(Header, 0, DataToHash, 0, Header.Length);
+                Buffer.BlockCopy(FileContent, 0, DataToHash, Header.Length, FileContent.Length);
+
+                var HashBytes = Sha256.ComputeHash(DataToHash);
+                return BitConverter.ToString(HashBytes).Replace("-", "").ToLower();
             }
         }
 

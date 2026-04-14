@@ -48,6 +48,10 @@ namespace Synrix
                     ConfigCommand(Args);
                     break;
 
+                case "login":
+                    LoginCommand(Args);
+                    break;
+
                 case "add":
                     AddCommand(Args);
                     break;
@@ -237,6 +241,22 @@ namespace Synrix
                 // SET CONFIG VALUE
                 RepoManager.SetConfigValue(Args[0], Args[1]);
                 Console.WriteLine($"SET {Args[0]} = {Args[1]}");
+            }
+        }
+
+        static void LoginCommand(string[] Args)
+        {
+            if (Args.Length < 3)
+            {
+                Console.WriteLine("USAGE: synrix login <site-url> <email> <password>");
+                return;
+            }
+
+            var Success = RemoteManager.LoginAsync(Args[0], Args[1], Args[2]).GetAwaiter().GetResult();
+
+            if (!Success)
+            {
+                Environment.ExitCode = 1;
             }
         }
 
@@ -1344,7 +1364,7 @@ namespace Synrix
         {
             var allCommands = new[]
             {
-                "init", "config", "add", "commit", "status", "log", "show",
+                "init", "config", "login", "add", "commit", "status", "log", "show",
                 "branch", "checkout", "switch", "merge", "diff", "reset",
                 "rm", "mv", "graph", "remote", "push", "pull", "fetch",
                 "clone", "reflog", "stash", "tag", "rebase", "undo", "redo",
@@ -1412,6 +1432,7 @@ namespace Synrix
             Console.ResetColor();
             Console.WriteLine("  init              Initialize A New Repository");
             Console.WriteLine("  config            Get Or Set Configuration Values");
+            Console.WriteLine("  login             Authenticate Against A SynrixForge Server");
             Console.WriteLine();
             
             Console.ForegroundColor = ConsoleColor.Green;

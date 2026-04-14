@@ -770,7 +770,7 @@ namespace Synrix.Core
         {
             try
             {
-                Console.WriteLine($"CLONING {RemoteUrl} INTO {TargetPath}...");
+                    Console.WriteLine($"Cloning {RemoteUrl} Into {TargetPath}...");
 
                 var RemoteType = DetermineRemoteTypeFromUrl(RemoteUrl);
 

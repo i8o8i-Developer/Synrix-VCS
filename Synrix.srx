@@ -880,8 +880,6 @@ namespace Synrix
 
             targetPath = Path.GetFullPath(targetPath);
 
-            Console.WriteLine($"Cloning {sourceUrl} Into {targetPath}...");
-
             var success = RemoteManager.CloneAsync(sourceUrl, targetPath).GetAwaiter().GetResult();
 
             if (success)

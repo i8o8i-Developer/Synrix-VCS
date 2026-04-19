@@ -26,7 +26,7 @@ function Assert-LastExitCode {
 
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host "  SYNRIX BUILD SCRIPT" -ForegroundColor Cyan
-Write-Host "  VERSION 2.0.0" -ForegroundColor Cyan
+Write-Host "  VERSION 5.2.4" -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 

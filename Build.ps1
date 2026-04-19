@@ -6,12 +6,16 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSCommandPath
 $OutputRoot = Join-Path $ProjectRoot "Bin"
+$ReleaseRoot = Join-Path $ProjectRoot "Releases"
+$ReleaseDirectory = Join-Path $ReleaseRoot $Runtime
 $BuildStamp = [Guid]::NewGuid().ToString("N")
 $PayloadDirectory = Join-Path $OutputRoot "payload"
 $CliPublishDirectory = Join-Path $OutputRoot ("synrix-publish-" + $BuildStamp)
 $InstallerPublishDirectory = Join-Path $OutputRoot ("installer-publish-" + $BuildStamp)
 $CliExecutablePath = Join-Path $OutputRoot "synrix.exe"
 $InstallerExecutablePath = Join-Path $OutputRoot "SynrixInstaller.exe"
+$CliReleasePath = Join-Path $ReleaseDirectory "synrix.exe"
+$InstallerReleasePath = Join-Path $ReleaseDirectory "SynrixInstaller.exe"
 $PayloadPath = Join-Path $PayloadDirectory "synrix.exe"
 
 function Assert-LastExitCode {
@@ -44,6 +48,7 @@ Write-Host ""
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $PayloadDirectory | Out-Null
+New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
 
 Write-Host "PUBLISHING SYNRIX CLI..." -ForegroundColor Yellow
 
@@ -64,6 +69,7 @@ if (!(Test-Path $PublishedCliExecutable)) {
 
 Copy-Item $PublishedCliExecutable $CliExecutablePath -Force
 Copy-Item $PublishedCliExecutable $PayloadPath -Force
+Copy-Item $PublishedCliExecutable $CliReleasePath -Force
 
 Write-Host "PUBLISHING WINDOWS INSTALLER..." -ForegroundColor Yellow
 
@@ -83,11 +89,14 @@ if (!(Test-Path $PublishedInstallerExecutable)) {
 }
 
 Copy-Item $PublishedInstallerExecutable $InstallerExecutablePath -Force
+Copy-Item $PublishedInstallerExecutable $InstallerReleasePath -Force
 
 Write-Host ""
 Write-Host "BUILD SUCCESSFUL!" -ForegroundColor Green
 Write-Host "CLI EXECUTABLE: $CliExecutablePath" -ForegroundColor Green
 Write-Host "INSTALLER EXE: $InstallerExecutablePath" -ForegroundColor Green
+Write-Host "DOWNLOADABLE CLI: $CliReleasePath" -ForegroundColor Green
+Write-Host "DOWNLOADABLE INSTALLER: $InstallerReleasePath" -ForegroundColor Green
 Write-Host ""
 
 $CliInfo = Get-Item $CliExecutablePath
